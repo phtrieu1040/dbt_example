@@ -1110,11 +1110,11 @@ class MyProject:
             counter = 0
             while counter <= 3:
                 counter += 1
-                # email_address = input('Email address: ')
-                # email_app_password = input('Email app password: ')
-                email_address='phtrieu1040@gmail.com'
+                email_address = input('Email address: ')
+                email_app_password = input('Email app password: ')
+                # email_address='phtrieu1040@gmail.com'
                 # email_app_password='kxwi hwjj tbdu qgtg'
-                email_app_password='kxwi hwjj tbdu qgt'
+                # email_app_password='kxwi hwjj tbdu qgt'
                 mail = GoogleMail(email_address=email_address, password=email_app_password)
                 try:
                     mail.get_email_ids()[1]
@@ -1141,42 +1141,51 @@ class MyProject:
                 print(f'error: {e}')
             pass
 
-        def _end(self):
+        def _check_login(self):
             try:
-                print(self.mail)
-            except Exception as e:
-                print(e)
+                a = self.mail
+            except:
+                a = None
+            if a:
+                return self.mail
+            else:
+                return None
+            
+        def _get_bank_email(self, id):
+            mail = self._check_login()
+            if mail:
+                pass
+            else: return
+
+            result = self.mail.fetch_email_by_id(id)
+            print(result[2])
+
+            
+            
 
 
-        def _get_bank_notification(self, *args: Literal['input sender email of banks']):
+
+        def _get_bank_notification(self, log_path, *args: Literal['input sender email of banks']):
+            bank_email_list = args
+            mail = self._check_login()
+            if mail:
+                pass
+            else:
+                return
             email_num = MyFunction._get_input_num_type(message='How many email to retrieve?')
-            # email_address='phtrieu1040@gmail.com'
-            # email_app_password='kxwi hwjj tbdu qgtg'
-            # counter = 0
-            # while counter <= 3:
-            #     counter += 1
-            #     email_address = input('Email address: ')
-            #     email_app_password = input('Email app password: ')
-            #     mail = GoogleMail(email_address=email_address, password=email_app_password)
-            #     try:
-            #         mail.get_email_ids()[1]
-            #         break
-            #     except Exception as e:
-            #         print(e)
-            #         if counter == 3:
-            #             print('wrong, can only try 3 times')
-            #             return
-            #         else:
-            #             print('wrong email or password, try again')
-            #         continue
+
             try:
                 email_id_list = self.mail.get_email_ids()[-email_num:]
             except Exception as e:
                 print('error getting email ids with error: {}'.format(e))
                 return
+            
+            MyFunction.procedure_and_logging(
+                log_path=f'{log_path}\log.csv',
+                input_list=email_id_list,
+                main_func=self._get_email
+            )
 
 
             print(email_id_list)
-            # print(email_num)
-            # mail._log_out_email()
-            # pass
+            self.mail._log_out_email()
