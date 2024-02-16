@@ -20,6 +20,9 @@ from typing import Literal
 from datetime import datetime, date, timedelta
 import pytz
 import imaplib
+import email
+from email.header import decode_header
+import html2text
 
 
 SCOPES=["https://www.googleapis.com/auth/bigquery","https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"]
@@ -346,6 +349,83 @@ class Googlesheet:
             .batchUpdate(spreadsheetId=sheetID,body=batch_update_values_request_body)
             .execute())
         return result
+
+
+class GoogleMail:
+    def __init__(self, email_address, password) -> None:
+        self.email_address = email_address
+        self.password = password
+        self._gmail = imaplib.IMAP4_SSL("imap.gmail.com")
+
+    @property
+    def gmail(self):
+        return self._gmail
+    
+    @gmail.setter
+    def gmail(self, new_gmail):
+        self._gmail = new_gmail
+    
+    def _login_gmail(self):
+        self._check_gmail_connection()
+        try:
+            self.gmail.login(self.email_address, self.password)
+        except Exception as e:
+            pass
+
+    def _check_gmail_connection(self):
+        try:
+            status, _ = self.gmail.noop()
+        except Exception as e:
+            status = None
+        if status == 'OK':
+            return
+        else:
+            self.gmail = imaplib.IMAP4_SSL("imap.gmail.com")
+
+    def _log_out_email(self):
+        self.gmail.logout()
+
+    def get_email_ids(self):
+        self._check_gmail_connection()
+        self._login_gmail()
+        self._read_inbox()
+        _, email_ids_str = self.gmail.search(None, 'All')
+        email_ids = email_ids_str[0].split()
+        return email_ids
+    
+    def _read_inbox(self):
+        self.gmail.select('inbox')
+
+    def fetch_email_by_id(self, id):
+        self._login_gmail()
+        self._read_inbox()
+        _, msg_data = self.gmail.fetch(id, "(RFC822)")
+        raw_email = msg_data[0][1]
+        msg = email.message_from_bytes(raw_email)
+        subject, encoding = decode_header(msg["Subject"])[0]
+        from_address = msg.get("From")
+        date_sent = msg.get("Date")
+        body=''
+        if msg.is_multipart():
+            for part in msg.walk():
+                content_type = part.get_content_type()
+                content_disposition = str(part.get("Content-Disposition"))
+                if "text/plain" in content_type and "attachment" not in content_disposition:
+                    body += part.get_payload(decode=True).decode()
+                elif "text/html" in content_type and "attachment" not in content_disposition:
+                    # Convert HTML to plain text
+                    body += html2text.html2text(part.get_payload(decode=True).decode())
+                
+        else:
+            body = msg.get_payload(decode=True).decode()
+        body = body.replace('\n',' ').replace('\r','')
+        try:
+            subject = subject.decode('utf-8')
+            subject = MyFunction._remove_accents(subject)
+            subject = MyFunction._remove_strange_symbols([subject])
+        except:
+            pass
+        return str(id), subject, from_address, date_sent, body
 
 class Bigquery:
     def __init__(self, directory):
@@ -802,7 +882,7 @@ class MyFunction:
     def _write_csv_log(cls, file_path, key_column, *args):
         _data = args + (cls._get_current_time('string'),) #add write time
         data = list(_data)
-        print(data, args)
+        # print(data, args)
         if os.path.exists(file_path):
             all_rows = cls._read_csv(file_path=file_path)
             if all_rows is None:
@@ -836,7 +916,7 @@ class MyFunction:
             cls._write_csv(file_path=file_path, mode='a', data_to_write=data_to_write)
         except Exception as e:
             print(e)
-        print(data_to_write)
+        # print(data_to_write)
 
     @classmethod
     def sheet_id_to_url(cls,sheets_id):
@@ -983,3 +1063,120 @@ class MyFunction:
         df.columns = df.columns.map(cls._remove_accents)
         df.columns = df.columns.map(cls._transform_column_name_first_letter)
         cls._make_column_name_unique(df)
+    
+    @classmethod
+    def _get_input_num_type(cls, message):
+        while True:
+            limit = input(f'{message}')
+            try:
+                input_number = int(limit)
+            except:
+                print('Please enter a number')
+                continue
+            break
+        return input_number
+                
+
+class MyProjectProperty:
+    def __init__(self):
+        counter = 0
+        while counter <= 3:
+            counter += 1
+            email_address = input('Email address: ')
+            email_app_password = input('Email app password: ')
+            mail = GoogleMail(email_address=email_address, password=email_app_password)
+            try:
+                mail.get_email_ids()[1]
+                break
+            except Exception as e:
+                print(e)
+                if counter == 3:
+                    print('wrong, can only try 3 times')
+                    return
+                else:
+                    print('wrong email or password, try again')
+                continue
+        self._mail = mail
+    
+    @property
+    def mail(self):
+        return self._mail
+        
+
+class MyProject:
+
+    class MyProjectProperty:
+        def __init__(self):
+            counter = 0
+            while counter <= 3:
+                counter += 1
+                # email_address = input('Email address: ')
+                # email_app_password = input('Email app password: ')
+                email_address='phtrieu1040@gmail.com'
+                # email_app_password='kxwi hwjj tbdu qgtg'
+                email_app_password='kxwi hwjj tbdu qgt'
+                mail = GoogleMail(email_address=email_address, password=email_app_password)
+                try:
+                    mail.get_email_ids()[1]
+                    break
+                except Exception as e:
+                    print(e)
+                    if counter == 3:
+                        print('wrong, can only try 3 times')
+                        return
+                    else:
+                        print('wrong email or password, try again')
+                    continue
+            self._mail = mail
+    
+        @property
+        def mail(self):
+            return self._mail
+
+    class MainProject:
+        def __init__(self) -> None:
+            try:
+                self.mail = MyProject.MyProjectProperty().mail
+            except Exception as e:
+                print(f'error: {e}')
+            pass
+
+        def _end(self):
+            try:
+                print(self.mail)
+            except Exception as e:
+                print(e)
+
+
+        def _get_bank_notification(self, *args: Literal['input sender email of banks']):
+            email_num = MyFunction._get_input_num_type(message='How many email to retrieve?')
+            # email_address='phtrieu1040@gmail.com'
+            # email_app_password='kxwi hwjj tbdu qgtg'
+            # counter = 0
+            # while counter <= 3:
+            #     counter += 1
+            #     email_address = input('Email address: ')
+            #     email_app_password = input('Email app password: ')
+            #     mail = GoogleMail(email_address=email_address, password=email_app_password)
+            #     try:
+            #         mail.get_email_ids()[1]
+            #         break
+            #     except Exception as e:
+            #         print(e)
+            #         if counter == 3:
+            #             print('wrong, can only try 3 times')
+            #             return
+            #         else:
+            #             print('wrong email or password, try again')
+            #         continue
+            try:
+                email_id_list = self.mail.get_email_ids()[-email_num:]
+            except Exception as e:
+                print('error getting email ids with error: {}'.format(e))
+                return
+
+
+            print(email_id_list)
+            # print(email_num)
+            # mail._log_out_email()
+            # pass
