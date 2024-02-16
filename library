@@ -968,3 +968,7 @@ class MyFunction:
         df.columns = df.columns.map(cls._remove_accents)
         df.columns = df.columns.map(cls._transform_column_name_first_letter)
         cls._make_column_name_unique(df)
+
+    @classmethod
+    def test(cls):
+        print('test')
