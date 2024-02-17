@@ -934,7 +934,7 @@ class MyFunction:
             print(column)
     
     @classmethod
-    def procedure_and_logging(cls, log_path, input_list, main_func, key_column='key_column'):
+    def procedure_and_logging(cls, log_path, input_list, main_func, key_column='key_column', *args):
         input_list_number = ''
         while True:
             input_limit = input('Perform for all input? (y/n): ')
@@ -972,7 +972,10 @@ class MyFunction:
         else:
             remaining_procedure = input_list
         for procedure in remaining_procedure:
-            data = main_func(procedure)
+            data = main_func(procedure, *args)
+            if data is None:
+                print('Return None')
+                continue
             cls._write_csv_log(log_path, key_column, *data)
 
     @classmethod
@@ -1077,30 +1080,6 @@ class MyFunction:
         return input_number
                 
 
-class MyProjectProperty:
-    def __init__(self):
-        counter = 0
-        while counter <= 3:
-            counter += 1
-            email_address = input('Email address: ')
-            email_app_password = input('Email app password: ')
-            mail = GoogleMail(email_address=email_address, password=email_app_password)
-            try:
-                mail.get_email_ids()[1]
-                break
-            except Exception as e:
-                print(e)
-                if counter == 3:
-                    print('wrong, can only try 3 times')
-                    return
-                else:
-                    print('wrong email or password, try again')
-                continue
-        self._mail = mail
-    
-    @property
-    def mail(self):
-        return self._mail
         
 
 class MyProject:
@@ -1110,11 +1089,10 @@ class MyProject:
             counter = 0
             while counter <= 3:
                 counter += 1
-                email_address = input('Email address: ')
-                email_app_password = input('Email app password: ')
-                # email_address='phtrieu1040@gmail.com'
-                # email_app_password='kxwi hwjj tbdu qgtg'
-                # email_app_password='kxwi hwjj tbdu qgt'
+                # email_address = input('Email address: ')
+                # email_app_password = input('Email app password: ')
+                email_address='phtrieu1040@gmail.com'
+                email_app_password='kxwi hwjj tbdu qgtg'
                 mail = GoogleMail(email_address=email_address, password=email_app_password)
                 try:
                     mail.get_email_ids()[1]
@@ -1151,7 +1129,7 @@ class MyProject:
             else:
                 return None
             
-        def _get_bank_email(self, id):
+        def _get_bank_email(self, id, bank_email_list):
             mail = self._check_login()
             if mail:
                 pass
@@ -1159,15 +1137,15 @@ class MyProject:
 
             result = self.mail.fetch_email_by_id(id)
             print(result[2])
-
-            
-            
-
-
+            print(bank_email_list)
+            print(result[2] in bank_email_list)
+            if result[2] in bank_email_list:
+                return result
+            else: return None
 
         def _get_bank_notification(self, log_path, *args: Literal['input sender email of banks']):
-            bank_email_list = args
             mail = self._check_login()
+
             if mail:
                 pass
             else:
@@ -1181,9 +1159,11 @@ class MyProject:
                 return
             
             MyFunction.procedure_and_logging(
-                log_path=f'{log_path}\log.csv',
-                input_list=email_id_list,
-                main_func=self._get_email
+                f'{log_path}\log.csv',
+                email_id_list,
+                self._get_bank_email,
+                'key_column',
+                args
             )
 
 
