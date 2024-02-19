@@ -61,8 +61,8 @@ class Tokenization:
                 pickle.dump(gauth, token)
 
 class Authorization:
-    def __init__(self, directory):
-        os.chdir(directory)
+    def __init__(self, client_secret_directory):
+        os.chdir(client_secret_directory)
         checker_client = True
         checker_pydrive = True
         while checker_client:
@@ -73,10 +73,10 @@ class Authorization:
                 continue
             elif (creds is not None and creds.expired) or creds is None:
                 try:
-                    os.remove('{}\{}'.format(directory, client_token))
+                    os.remove('{}\{}'.format(client_secret_directory, client_token))
                 except Exception:
                     print('No Token, Now Create New Cred!')
-                Tokenization.create_cred(type='client', client_secret=r'{}\client_secret.json'.format(directory))
+                Tokenization.create_cred(type='client', client_secret=r'{}\client_secret.json'.format(client_secret_directory))
             else: break
             
         while checker_pydrive:
@@ -86,10 +86,10 @@ class Authorization:
                 continue
             elif (gauth is not None and gauth.access_token_expired) or gauth is None:
                 try:
-                    os.remove('{}\{}'.format(directory, pydrive_token))
+                    os.remove('{}\{}'.format(client_secret_directory, pydrive_token))
                 except Exception:
                     print('No Drive Token, Now Create New Cred!')
-                Tokenization.create_cred(type='pydrive', client_secret=r'{}\client_secret.json'.format(directory))
+                Tokenization.create_cred(type='pydrive', client_secret=r'{}\client_secret.json'.format(client_secret_directory))
             else: break
         
         self._client = bigquery.Client(project='tiki-analytics-dwh', credentials=creds)
@@ -120,8 +120,8 @@ class Authorization:
 
 
 class Googlesheet:
-    def __init__(self, directory):
-        self._Credential = Authorization(directory)
+    def __init__(self, client_secret_directory):
+        self._Credential = Authorization(client_secret_directory)
 
     @property
     def Credential(self):
@@ -433,8 +433,8 @@ class GoogleMail:
         return str(id), subject, sender, date_sent, body
 
 class Bigquery:
-    def __init__(self, directory):
-        self._Credential = Authorization(directory)
+    def __init__(self, client_secret_directory):
+        self._Credential = Authorization(client_secret_directory)
 
     @property
     def Credential(self):
@@ -593,9 +593,10 @@ class Bigquery:
 
 class MyLibrary:
     # def __init__(self, type: Literal['Bigquery', 'Google', 'UserDefined']) -> None:
-    def __init__(self, directory) -> None:
-        self._bigquery = Bigquery(directory)
-        self._google = Googlesheet(directory)
+    def __init__(self, client_secret_directory=None) -> None:
+        if client_secret_directory:
+            self._bigquery = Bigquery(client_secret_directory)
+            self._google = Googlesheet(client_secret_directory)
     
     @property
     def bigquery(self):
