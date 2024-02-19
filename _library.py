@@ -414,8 +414,10 @@ class GoogleMail:
                 if "text/plain" in content_type and "attachment" not in content_disposition:
                     body += part.get_payload(decode=True).decode()
                 elif "text/html" in content_type and "attachment" not in content_disposition:
-                    # Convert HTML to plain text
-                    body += html2text.html2text(part.get_payload(decode=True).decode())
+                    body += part.get_payload(decode=True).decode()
+
+                    # # Convert HTML to plain text
+                    # body += html2text.html2text(part.get_payload(decode=True).decode())
                 
         else:
             body = msg.get_payload(decode=True).decode()
@@ -431,6 +433,24 @@ class GoogleMail:
         sender = MyFunction._extract_email(from_address)
         print(sender, type(sender))
         return str(id), subject, sender, date_sent, body
+    
+    def _extract_bank_body(self, email, body):
+        method_dictionary = {
+            'alerts@citibank.com.vn': self.__extract_citibank_body,
+            'info@myvib.vib.com.vn': self.__extract_vib_body
+        }
+        return method_dictionary[email](body)
+    
+    def __extract_citibank_body(self, body):
+        email_body = html2text.html2text(body)
+        match = re.search(r'VND[\d,]+', email_body)
+        if match:
+            return match.group()
+        else:
+            return None
+        
+    def __extract_vib_body(self, body):
+        pass
 
 class Bigquery:
     def __init__(self, client_secret_directory):
@@ -1093,6 +1113,11 @@ class MyFunction:
             return match.group()
         else:
             return None
+        
+    @classmethod
+    def _string_replace(cls, string, **kwargs):
+        result = ''.join(kwargs.get(c, c) for c in string)
+        return result
 
                 
 
@@ -1156,6 +1181,7 @@ class MyProject:
             print(bank_email_list)
             print(result[2] in bank_email_list)
             if result[2] in bank_email_list:
+
                 return result
             else: return None
 
