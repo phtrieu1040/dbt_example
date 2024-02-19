@@ -23,6 +23,7 @@ import imaplib
 import email
 from email.header import decode_header
 import html2text
+import re
 
 
 SCOPES=["https://www.googleapis.com/auth/bigquery","https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"]
@@ -418,14 +419,18 @@ class GoogleMail:
                 
         else:
             body = msg.get_payload(decode=True).decode()
-        body = body.replace('\n',' ').replace('\r','')
+        replacements = {'\n': ' ', '\r': '', '“': '', '”':''} 
+        body = ''.join(replacements.get(c, c) for c in body)
+        # body = body.replace('\n',' ').replace('\r','').replace('“', '')
         try:
             subject = subject.decode('utf-8')
             subject = MyFunction._remove_accents(subject)
             subject = MyFunction._remove_strange_symbols([subject])
         except:
             pass
-        return str(id), subject, from_address, date_sent, body
+        sender = MyFunction._extract_email(from_address)
+        print(sender, type(sender))
+        return str(id), subject, sender, date_sent, body
 
 class Bigquery:
     def __init__(self, directory):
@@ -1078,6 +1083,16 @@ class MyFunction:
                 continue
             break
         return input_number
+    
+    @classmethod
+    def _extract_email(cls, text):
+        pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+        match = re.search(pattern, text)
+        if match:
+            return match.group()
+        else:
+            return None
+
                 
 
         
