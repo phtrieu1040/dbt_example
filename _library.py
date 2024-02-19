@@ -421,8 +421,11 @@ class GoogleMail:
                 
         else:
             body = msg.get_payload(decode=True).decode()
-        replacements = {'\n': ' ', '\r': '', '“': '', '”':''} 
-        body = ''.join(replacements.get(c, c) for c in body)
+        # replacements = {'\n': ' ', '\r': '', '“': '', '”':'', '₫':''} 
+        # body = ''.join(replacements.get(c, c) for c in body)
+        body = MyFunction._remove_other_symbols(input_str=body)
+        body = MyFunction._remove_accents(body)
+        # body = MyFunction._remove_strange_symbols([body])
         # body = body.replace('\n',' ').replace('\r','').replace('“', '')
         try:
             subject = subject.decode('utf-8')
@@ -431,7 +434,7 @@ class GoogleMail:
         except:
             pass
         sender = MyFunction._extract_email(from_address)
-        print(sender, type(sender))
+        # print(sender, type(sender))
         return str(id), subject, sender, date_sent, body
     
     def _extract_bank_body(self, email, body):
@@ -443,14 +446,31 @@ class GoogleMail:
     
     def __extract_citibank_body(self, body):
         email_body = html2text.html2text(body)
-        match = re.search(r'VND[\d,]+', email_body)
+        match = re.search(r'VND([\d,]+)', email_body)
         if match:
-            return match.group()
+            result = match.group(1)
+            result = result.replace(',','')
+            result = int(result)
+            return result
         else:
             return None
         
     def __extract_vib_body(self, body):
-        pass
+        email_body = html2text.html2text(body)
+        match = re.search(r'\nSo tien\s*\|\s*([\d,]+)', email_body)
+        if match:
+            result = match.group(1)
+            result = result.replace(',','')
+            result = int(result)
+            return result
+        else:
+            match = re.search(r'\nSo tien thanh toan\s*\|\s*([\d,]+)', email_body)
+            if match:
+                result = match.group(1)
+                result = result.replace(',','')
+                result = int(result)
+                return result
+            else: return None
 
 class Bigquery:
     def __init__(self, client_secret_directory):
@@ -1044,6 +1064,11 @@ class MyFunction:
         filtered_data = [pattern.sub('', item) for item in input_str]
         return filtered_data
     
+    @classmethod
+    def _remove_other_symbols(cls, input_str):
+        replacements = {'\n': ' ', '\r': '', '“': '', '”':'', '₫':''} 
+        body = ''.join(replacements.get(c, c) for c in input_str)
+        return body
         
     @classmethod
     def _transform_column_name_first_letter(cls, column_name):
@@ -1176,12 +1201,18 @@ class MyProject:
                 pass
             else: return
 
-            result = self.mail.fetch_email_by_id(id)
-            print(result[2])
-            print(bank_email_list)
-            print(result[2] in bank_email_list)
-            if result[2] in bank_email_list:
-
+            raw_result = self.mail.fetch_email_by_id(id)
+            # print(result[2], id)
+            # print(bank_email_list)
+            # print(result[2] in bank_email_list)
+            if raw_result[2] in bank_email_list:
+                try:
+                    body = self.mail._extract_bank_body(raw_result[2], raw_result[-1])
+                except:
+                    print('problem', id)
+                
+                result = list(raw_result[:-1])
+                result.append(body)
                 return result
             else: return None
 
