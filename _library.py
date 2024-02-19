@@ -440,7 +440,8 @@ class GoogleMail:
     def _extract_bank_body(self, email, body):
         method_dictionary = {
             'alerts@citibank.com.vn': self.__extract_citibank_body,
-            'info@myvib.vib.com.vn': self.__extract_vib_body
+            'info@myvib.vib.com.vn': self.__extract_vib_body,
+            'info@vib.com.vn': self.__extract_vib_credit_body
         }
         return method_dictionary[email](body)
     
@@ -454,7 +455,18 @@ class GoogleMail:
             return result
         else:
             return None
-        
+    
+    def __extract_vib_credit_body(self, body):
+        email_body = html2text.html2text(body)
+        match = re.search(r'\nGia tri: \*\*([\d,]+) VND\*\*', email_body)
+        if match:
+            result = match.group(1)
+            result = result.replace(',','')
+            result = int(result)
+            return result
+        else:
+            return None
+
     def __extract_vib_body(self, body):
         email_body = html2text.html2text(body)
         match = re.search(r'\nSo tien\s*\|\s*([\d,]+)', email_body)
