@@ -1015,7 +1015,9 @@ class MyFunction:
             pass
         else:
             input_list = input_list[:input_list_number]
-
+        
+        _input_list = [str(i) if isinstance(i, bytes) else i for i in input_list]
+        input_type = type(input_list[0])
 
         if os.path.exists(log_path):
             all_logs = cls._read_csv(file_path=log_path)
@@ -1026,7 +1028,10 @@ class MyFunction:
                 return
             df_all_logs = pd.DataFrame(all_logs)
             completed_procedure = df_all_logs[key_column].to_list()
-            remaining_procedure = MyFunction.non_outer_join_a_vs_b(a=completed_procedure, b=input_list)
+            _remaining_procedure = MyFunction.non_outer_join_a_vs_b(a=completed_procedure, b=_input_list)
+            if input_type is bytes:
+                remaining_procedure = [i[2:-1].encode('ascii') for i in _remaining_procedure]
+            else: remaining_procedure = _remaining_procedure
         else:
             remaining_procedure = input_list
         for procedure in remaining_procedure:
@@ -1254,3 +1259,5 @@ class MyProject:
 
             print(email_id_list)
             self.mail._log_out_email()
+
+    ##a test here
