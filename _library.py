@@ -24,6 +24,9 @@ import email
 from email.header import decode_header
 import html2text
 import re
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
 
 SCOPES=["https://www.googleapis.com/auth/bigquery","https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"]
@@ -406,6 +409,11 @@ class GoogleMail:
         subject, encoding = decode_header(msg["Subject"])[0]
         from_address = msg.get("From")
         date_sent = msg.get("Date")
+        try:
+            date_sent = MyFunction.convert_long_date_to_gmt7(date_sent)
+        except Exception as e:
+            print(id, e)
+        print(date_sent)
         body=''
         if msg.is_multipart():
             for part in msg.walk():
@@ -483,6 +491,34 @@ class GoogleMail:
                 result = int(result)
                 return result
             else: return None
+
+    def send_email(self, subject, body, to_email):
+        msg = MIMEMultipart()
+        msg['From'] = self.email_address
+        msg['To'] = to_email
+        msg['Subject'] = subject
+
+        # Convert DataFrame to HTML table
+        if type(body) is pd.core.frame.DataFrame:
+            body_type = 'html'
+            email_body = body.to_html(index=False)
+        else:
+            body_type = 'plain'
+            email_body = body
+
+        # Attach the HTML table to the email body
+        msg.attach(MIMEText(email_body, body_type))
+
+        try:
+            server = smtplib.SMTP('smtp.gmail.com', 587)
+            server.starttls()
+            server.login(self.email_address, self.password)
+            text = msg.as_string()
+            server.sendmail(self.email_address, to_email, text)
+            server.quit()
+            print("Email sent successfully!")
+        except Exception as e:
+            print(f"Error sending email: {e}")
 
 class Bigquery:
     def __init__(self, client_secret_directory):
@@ -1160,10 +1196,17 @@ class MyFunction:
     def _string_replace(cls, string, **kwargs):
         result = ''.join(kwargs.get(c, c) for c in string)
         return result
-
-                
-
+    
+    @classmethod
+    def convert_long_date_to_gmt7(cls, date_string):
+        date_string = date_string.split('(')[0].strip()
+        time_adjust = int(date_string[-5:-2])
         
+        date_format = "%a, %d %b %Y %H:%M:%S %z"
+        dt = datetime.strptime(date_string, date_format)
+        dt_gmt_plus_7 = dt + timedelta(hours=(7-time_adjust))
+        result = dt_gmt_plus_7.strftime("%a, %d %b %Y %H:%M:%S")
+        return result            
 
 class MyProject:
 
@@ -1257,7 +1300,7 @@ class MyProject:
             )
 
 
-            print(email_id_list)
+            # print(email_id_list)
             self.mail._log_out_email()
 
     ##a test here
