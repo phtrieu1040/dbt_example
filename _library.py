@@ -125,6 +125,7 @@ class Authorization:
 class Googlesheet:
     def __init__(self, client_secret_directory):
         self._Credential = Authorization(client_secret_directory)
+        self.client_secret_directory = client_secret_directory
 
     @property
     def Credential(self):
@@ -138,7 +139,7 @@ class Googlesheet:
         creds = Tokenization.load_cred(client_token)
         gauth = Tokenization.load_cred(pydrive_token)
         if self.Credential.client._credentials.expired or self.Credential.gauth.access_token_expired or creds is None or gauth is None:
-            self.Credential = Authorization()
+            self.Credential = Authorization(self.client_secret_directory)
 
     def _get_sheet(self, url):
         self.check_cred()
@@ -523,6 +524,7 @@ class GoogleMail:
 class Bigquery:
     def __init__(self, client_secret_directory):
         self._Credential = Authorization(client_secret_directory)
+        self.client_secret_directory = client_secret_directory
 
     @property
     def Credential(self):
@@ -536,7 +538,7 @@ class Bigquery:
         creds = Tokenization.load_cred(client_token)
         gauth = Tokenization.load_cred(pydrive_token)
         if self.Credential.client._credentials.expired or self.Credential.gauth.access_token_expired or creds is None or gauth is None:
-            self.Credential = Authorization()
+            self.Credential = Authorization(self.client_secret_directory)
     
     def _get_bqr_client(self):
         self.check_cred()
@@ -681,10 +683,11 @@ class Bigquery:
 
 class MyLibrary:
     # def __init__(self, type: Literal['Bigquery', 'Google', 'UserDefined']) -> None:
-    def __init__(self, client_secret_directory=None) -> None:
-        if client_secret_directory:
-            self._bigquery = Bigquery(client_secret_directory)
-            self._google = Googlesheet(client_secret_directory)
+    def __init__(self) -> None:
+        # if client_secret_directory:
+        client_secret_directory = r'C:\trieu.pham\python\bigquery'
+        self._bigquery = Bigquery(client_secret_directory)
+        self._google = Googlesheet(client_secret_directory)
     
     @property
     def bigquery(self):
@@ -939,7 +942,8 @@ class MyFunction:
                     idxa += 1
         return joined_list
 
-    def extract_sheet_id(sheet_url):
+    @classmethod
+    def extract_sheet_id(cls, sheet_url):
         start_index = sheet_url.find("/d/")
         if start_index != -1:
             start_index += 3  # Move to the character after "/d/"
@@ -976,6 +980,7 @@ class MyFunction:
     def _write_csv_log(cls, file_path, key_column, *args):
         _data = args + (cls._get_current_time('string'),) #add write time
         data = list(_data)
+        print('test')
         # print(data, args)
         if os.path.exists(file_path):
             all_rows = cls._read_csv(file_path=file_path)
@@ -1058,9 +1063,6 @@ class MyFunction:
         if os.path.exists(log_path):
             all_logs = cls._read_csv(file_path=log_path)
             if all_logs is None:
-                # print('error reading log')
-                # completed_procedure = []
-                # os.remove(log_path)
                 return
             df_all_logs = pd.DataFrame(all_logs)
             completed_procedure = df_all_logs[key_column].to_list()
@@ -1073,9 +1075,11 @@ class MyFunction:
         for procedure in remaining_procedure:
             data = main_func(procedure, *args)
             if data is None:
-                print('Return None')
                 continue
-            cls._write_csv_log(log_path, key_column, *data)
+            if isinstance(data, tuple):
+                cls._write_csv_log(log_path, key_column, *data)
+            else:
+                cls._write_csv_log(log_path, key_column, data)
 
     @classmethod
     def _get_current_time(cls, type: Literal['date', 'time', 'datetime']='datetime'):
