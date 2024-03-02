@@ -97,6 +97,7 @@ class Authorization:
         
         self._client = bigquery.Client(project='tiki-analytics-dwh', credentials=creds)
         self._service = build('sheets', 'v4', credentials=creds)
+        self._drive_service = build('drive', 'v3', credentials=creds)
         self._gauth = gauth
         self._drive = GoogleDrive(gauth)
         self._gspread_client = gspread.authorize(creds)
@@ -108,6 +109,10 @@ class Authorization:
     @property
     def service(self):
         return self._service
+    
+    @property
+    def drive_service(self):
+        return self._drive_service
     
     @property
     def gauth(self):
@@ -321,6 +326,17 @@ class Googlesheet:
         self.check_cred()
         service_sheet = self.Credential.service.spreadsheets()
         return service_sheet
+    
+    def _modify_permision_by_drive_service(self, sheet_id, role:Literal['reader', 'writer'], type: Literal['anyone', 'user']):
+        self.check_cred()
+        new_permissions = {
+            'role': role,
+            'type': type
+        }
+        try:
+            self.Credential.drive_service.permissions().create(fileId=sheet_id, body=new_permissions).execute()
+        except Exception as e:
+            print(e)
     
     def _clear_sheet_by_client(self, sheetID, sheet_name):
         sheet = self._get_sheet_by_service()
@@ -978,10 +994,10 @@ class MyFunction:
     
     @classmethod
     def _write_csv_log(cls, file_path, key_column, *args):
-        _data = args + (cls._get_current_time('string'),) #add write time
-        data = list(_data)
-        print('test')
-        # print(data, args)
+        _data = list(args)
+        _data.insert(1, cls._get_current_time('string'))
+        # _data = args + (cls._get_current_time('string'),) #add write time
+        data = _data
         if os.path.exists(file_path):
             all_rows = cls._read_csv(file_path=file_path)
             if all_rows is None:
@@ -1000,13 +1016,13 @@ class MyFunction:
             if data_len == 2:
                 pass
             else:
-                key = data[0]
-                non_key = data[1:-1]
+                key = data[:2]
+                non_key = data[2:]
                 non_key_columns = cls.non_outer_join_a_vs_b(key, non_key)
                 for column in non_key_columns:
                     column_name = input(f'Enter column name for column ({column}): ')
                     column_names.append(column_name)
-            column_names_to_write = cls._to_list('row_number') + cls._to_list(key_column) + column_names + cls._to_list('write_time')
+            column_names_to_write = cls._to_list('row_number') + cls._to_list(key_column) + cls._to_list('write_time') + column_names
             mode = 'w'
             row_number = 1
             cls._write_csv(file_path=file_path, mode=mode, data_to_write=column_names_to_write)
@@ -1015,7 +1031,6 @@ class MyFunction:
             cls._write_csv(file_path=file_path, mode='a', data_to_write=data_to_write)
         except Exception as e:
             print(e)
-        # print(data_to_write)
 
     @classmethod
     def sheet_id_to_url(cls,sheets_id):
@@ -1027,7 +1042,6 @@ class MyFunction:
         column_list = df.columns.tolist()
         dup_columns = pd.DataFrame({'column':column_list}).groupby('column').agg(count=('column','count')).reset_index().query('count>1').column.tolist()
         if len(dup_columns) == 0:
-            print('ok')
             return
         for column in dup_columns:
             print(column)
@@ -1077,9 +1091,15 @@ class MyFunction:
             if data is None:
                 continue
             if isinstance(data, tuple):
-                cls._write_csv_log(log_path, key_column, *data)
+                try:
+                    cls._write_csv_log(log_path, key_column, *data)
+                except Exception as e:
+                    print('Error writing 01:', e)
             else:
-                cls._write_csv_log(log_path, key_column, data)
+                try:
+                    cls._write_csv_log(log_path, key_column, data)
+                except Exception as e:
+                    print('Error writing 02:', e)
 
     @classmethod
     def _get_current_time(cls, type: Literal['date', 'time', 'datetime']='datetime'):
@@ -1219,10 +1239,8 @@ class MyProject:
             counter = 0
             while counter <= 3:
                 counter += 1
-                # email_address = input('Email address: ')
-                # email_app_password = input('Email app password: ')
-                email_address='phtrieu1040@gmail.com'
-                email_app_password='kxwi hwjj tbdu qgtg'
+                email_address = input('Email address: ')
+                email_app_password = input('Email app password: ')
                 mail = GoogleMail(email_address=email_address, password=email_app_password)
                 try:
                     mail.get_email_ids()[1]
