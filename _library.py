@@ -1230,7 +1230,21 @@ class MyFunction:
         dt = datetime.strptime(date_string, date_format)
         dt_gmt_plus_7 = dt + timedelta(hours=(7-time_adjust))
         result = dt_gmt_plus_7.strftime("%a, %d %b %Y %H:%M:%S")
-        return result            
+        return result
+    
+    @classmethod
+    def list_to_single_string(cls, input, delimiter):
+        if isinstance(input,(list,tuple)):
+            pass
+        else:
+            print('input must be a list or tuple')
+        try:
+            single_string = delimiter.join(input)
+        except Exception as e:
+            print('error: ', e)
+            return
+        return single_string
+        
 
 class MyProject:
 
