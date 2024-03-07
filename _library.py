@@ -97,6 +97,7 @@ class Authorization:
         
         self._client = bigquery.Client(project='tiki-analytics-dwh', credentials=creds)
         self._service = build('sheets', 'v4', credentials=creds)
+        self._drive_service = build('drive', 'v3', credentials=creds)
         self._gauth = gauth
         self._drive = GoogleDrive(gauth)
         self._gspread_client = gspread.authorize(creds)
@@ -108,6 +109,10 @@ class Authorization:
     @property
     def service(self):
         return self._service
+    
+    @property
+    def drive_service(self):
+        return self._drive_service
     
     @property
     def gauth(self):
@@ -125,6 +130,7 @@ class Authorization:
 class Googlesheet:
     def __init__(self, client_secret_directory):
         self._Credential = Authorization(client_secret_directory)
+        self.client_secret_directory = client_secret_directory
 
     @property
     def Credential(self):
@@ -138,7 +144,7 @@ class Googlesheet:
         creds = Tokenization.load_cred(client_token)
         gauth = Tokenization.load_cred(pydrive_token)
         if self.Credential.client._credentials.expired or self.Credential.gauth.access_token_expired or creds is None or gauth is None:
-            self.Credential = Authorization()
+            self.Credential = Authorization(self.client_secret_directory)
 
     def _get_sheet(self, url):
         self.check_cred()
@@ -320,6 +326,17 @@ class Googlesheet:
         self.check_cred()
         service_sheet = self.Credential.service.spreadsheets()
         return service_sheet
+    
+    def _modify_permision_by_drive_service(self, sheet_id, role:Literal['reader', 'writer'], type: Literal['anyone', 'user']):
+        self.check_cred()
+        new_permissions = {
+            'role': role,
+            'type': type
+        }
+        try:
+            self.Credential.drive_service.permissions().create(fileId=sheet_id, body=new_permissions).execute()
+        except Exception as e:
+            print(e)
     
     def _clear_sheet_by_client(self, sheetID, sheet_name):
         sheet = self._get_sheet_by_service()
@@ -523,6 +540,7 @@ class GoogleMail:
 class Bigquery:
     def __init__(self, client_secret_directory):
         self._Credential = Authorization(client_secret_directory)
+        self.client_secret_directory = client_secret_directory
 
     @property
     def Credential(self):
@@ -536,7 +554,7 @@ class Bigquery:
         creds = Tokenization.load_cred(client_token)
         gauth = Tokenization.load_cred(pydrive_token)
         if self.Credential.client._credentials.expired or self.Credential.gauth.access_token_expired or creds is None or gauth is None:
-            self.Credential = Authorization()
+            self.Credential = Authorization(self.client_secret_directory)
     
     def _get_bqr_client(self):
         self.check_cred()
@@ -681,10 +699,11 @@ class Bigquery:
 
 class MyLibrary:
     # def __init__(self, type: Literal['Bigquery', 'Google', 'UserDefined']) -> None:
-    def __init__(self, client_secret_directory=None) -> None:
-        if client_secret_directory:
-            self._bigquery = Bigquery(client_secret_directory)
-            self._google = Googlesheet(client_secret_directory)
+    def __init__(self) -> None:
+        # if client_secret_directory:
+        client_secret_directory = r'C:\trieu.pham\python\bigquery'
+        self._bigquery = Bigquery(client_secret_directory)
+        self._google = Googlesheet(client_secret_directory)
     
     @property
     def bigquery(self):
@@ -939,7 +958,8 @@ class MyFunction:
                     idxa += 1
         return joined_list
 
-    def extract_sheet_id(sheet_url):
+    @classmethod
+    def extract_sheet_id(cls, sheet_url):
         start_index = sheet_url.find("/d/")
         if start_index != -1:
             start_index += 3  # Move to the character after "/d/"
@@ -974,9 +994,10 @@ class MyFunction:
     
     @classmethod
     def _write_csv_log(cls, file_path, key_column, *args):
-        _data = args + (cls._get_current_time('string'),) #add write time
-        data = list(_data)
-        # print(data, args)
+        _data = list(args)
+        _data.insert(1, cls._get_current_time('string'))
+        # _data = args + (cls._get_current_time('string'),) #add write time
+        data = _data
         if os.path.exists(file_path):
             all_rows = cls._read_csv(file_path=file_path)
             if all_rows is None:
@@ -995,13 +1016,13 @@ class MyFunction:
             if data_len == 2:
                 pass
             else:
-                key = data[0]
-                non_key = data[1:-1]
+                key = data[:2]
+                non_key = data[2:]
                 non_key_columns = cls.non_outer_join_a_vs_b(key, non_key)
                 for column in non_key_columns:
                     column_name = input(f'Enter column name for column ({column}): ')
                     column_names.append(column_name)
-            column_names_to_write = cls._to_list('row_number') + cls._to_list(key_column) + column_names + cls._to_list('write_time')
+            column_names_to_write = cls._to_list('row_number') + cls._to_list(key_column) + cls._to_list('write_time') + column_names
             mode = 'w'
             row_number = 1
             cls._write_csv(file_path=file_path, mode=mode, data_to_write=column_names_to_write)
@@ -1010,7 +1031,6 @@ class MyFunction:
             cls._write_csv(file_path=file_path, mode='a', data_to_write=data_to_write)
         except Exception as e:
             print(e)
-        # print(data_to_write)
 
     @classmethod
     def sheet_id_to_url(cls,sheets_id):
@@ -1022,7 +1042,6 @@ class MyFunction:
         column_list = df.columns.tolist()
         dup_columns = pd.DataFrame({'column':column_list}).groupby('column').agg(count=('column','count')).reset_index().query('count>1').column.tolist()
         if len(dup_columns) == 0:
-            print('ok')
             return
         for column in dup_columns:
             print(column)
@@ -1058,9 +1077,6 @@ class MyFunction:
         if os.path.exists(log_path):
             all_logs = cls._read_csv(file_path=log_path)
             if all_logs is None:
-                # print('error reading log')
-                # completed_procedure = []
-                # os.remove(log_path)
                 return
             df_all_logs = pd.DataFrame(all_logs)
             completed_procedure = df_all_logs[key_column].to_list()
@@ -1073,9 +1089,17 @@ class MyFunction:
         for procedure in remaining_procedure:
             data = main_func(procedure, *args)
             if data is None:
-                print('Return None')
                 continue
-            cls._write_csv_log(log_path, key_column, *data)
+            if isinstance(data, tuple):
+                try:
+                    cls._write_csv_log(log_path, key_column, *data)
+                except Exception as e:
+                    print('Error writing 01:', e)
+            else:
+                try:
+                    cls._write_csv_log(log_path, key_column, data)
+                except Exception as e:
+                    print('Error writing 02:', e)
 
     @classmethod
     def _get_current_time(cls, type: Literal['date', 'time', 'datetime']='datetime'):
@@ -1229,10 +1253,8 @@ class MyProject:
             counter = 0
             while counter <= 3:
                 counter += 1
-                # email_address = input('Email address: ')
-                # email_app_password = input('Email app password: ')
-                email_address='phtrieu1040@gmail.com'
-                email_app_password='kxwi hwjj tbdu qgtg'
+                email_address = input('Email address: ')
+                email_app_password = input('Email app password: ')
                 mail = GoogleMail(email_address=email_address, password=email_app_password)
                 try:
                     mail.get_email_ids()[1]
