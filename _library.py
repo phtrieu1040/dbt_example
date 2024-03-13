@@ -701,7 +701,8 @@ class MyLibrary:
     # def __init__(self, type: Literal['Bigquery', 'Google', 'UserDefined']) -> None:
     def __init__(self) -> None:
         # if client_secret_directory:
-        client_secret_directory = r'C:\trieu.pham\python\bigquery'
+        # client_secret_directory = r'C:\trieu.pham\python\bigquery'
+        client_secret_directory = r'C:\Python\file_token'
         self._bigquery = Bigquery(client_secret_directory)
         self._google = Googlesheet(client_secret_directory)
     
