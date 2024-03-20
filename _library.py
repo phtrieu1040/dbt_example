@@ -34,6 +34,7 @@ SCOPES=["https://www.googleapis.com/auth/bigquery","https://www.googleapis.com/a
 
 client_token='token.pickle'
 pydrive_token='pydrive_token.pickle'
+client_secret_file='client_secret.json'
 # os.chdir(r'C:\Python\file_token')
 # client_secret = r'C:\Python\file_token\client_secret.json'
 # client_secret=r"C:\trieu.pham\python\bigquery\client_secret.json"
@@ -41,58 +42,66 @@ pydrive_token='pydrive_token.pickle'
 
 class Tokenization:
     @staticmethod
-    def load_cred(name):
+    def load_cred(name, client_secret_directory):
+        creds_directory = os.path.join(client_secret_directory,name)
         try:
-            creds = pickle.load(open(name, 'rb'))
+            creds = pickle.load(open(creds_directory, 'rb'))
         except:
             return None
         return creds
 
     @staticmethod
-    def create_cred(type, client_secret):
+    def create_cred(type, client_secret_directory):
+        client_secret_file_path = os.path.join(client_secret_directory, client_secret_file)
+        token_file_path = os.path.join(client_secret_directory, client_token)
+        pydrive_token_file_path = os.path.join(client_secret_directory, pydrive_token)
         if type == 'client':
-            flow = InstalledAppFlow.from_client_secrets_file('client_secret.json', SCOPES)
+            flow = InstalledAppFlow.from_client_secrets_file(client_secret_file_path, SCOPES)
             creds = flow.run_local_server(port=0)
-            with open('token.pickle', 'wb') as token:
+            with open(token_file_path, 'wb') as token:
                 pickle.dump(creds, token)
 
         elif type == 'pydrive':
             gauth = GoogleAuth()
-            gauth.DEFAULT_SETTINGS['client_config_file'] = client_secret
+            gauth.DEFAULT_SETTINGS['client_config_file'] = client_secret_file_path
             gauth.LocalWebserverAuth()
-            with open(pydrive_token, 'wb') as token:
+            with open(pydrive_token_file_path, 'wb') as token:
                 pickle.dump(gauth, token)
 
 class Authorization:
     def __init__(self, client_secret_directory):
-        os.chdir(client_secret_directory)
+        # os.chdir(client_secret_directory)
+        client_token_file_path = os.path.join(client_secret_directory, client_token)
+        pydrive_token_file_path = os.path.join(client_secret_directory, pydrive_token)
         checker_client = True
         checker_pydrive = True
         while checker_client:
-            creds = Tokenization.load_cred(client_token)
+            creds = Tokenization.load_cred(client_token, client_secret_directory)
             # gauth = Tokenization.load_cred(pydrive_token)
             if creds is not None and not creds.expired:
                 checker_client = False
                 continue
             elif (creds is not None and creds.expired) or creds is None:
                 try:
-                    os.remove('{}\{}'.format(client_secret_directory, client_token))
+                    # os.remove('{}\{}'.format(client_secret_directory, client_token))
+                    os.remove(client_token_file_path)
                 except Exception:
                     print('No Token, Now Create New Cred!')
-                Tokenization.create_cred(type='client', client_secret=r'{}\client_secret.json'.format(client_secret_directory))
+                Tokenization.create_cred(type='client', client_secret_directory=client_secret_directory)
             else: break
             
         while checker_pydrive:
-            gauth = Tokenization.load_cred(pydrive_token)
+            gauth = Tokenization.load_cred(pydrive_token, client_secret_directory)
             if gauth is not None and not gauth.access_token_expired:
                 checker_pydrive = False
                 continue
             elif (gauth is not None and gauth.access_token_expired) or gauth is None:
                 try:
-                    os.remove('{}\{}'.format(client_secret_directory, pydrive_token))
+                    # os.remove('{}\{}'.format(client_secret_directory, pydrive_token))
+                    os.remove(pydrive_token_file_path)
                 except Exception:
                     print('No Drive Token, Now Create New Cred!')
-                Tokenization.create_cred(type='pydrive', client_secret=r'{}\client_secret.json'.format(client_secret_directory))
+                Tokenization.create_cred(type='pydrive', client_secret_directory=client_secret_directory)
             else: break
         
         self._client = bigquery.Client(project='tiki-analytics-dwh', credentials=creds)
@@ -141,8 +150,8 @@ class Googlesheet:
         self._Credential = new_credential
 
     def check_cred(self):
-        creds = Tokenization.load_cred(client_token)
-        gauth = Tokenization.load_cred(pydrive_token)
+        creds = Tokenization.load_cred(client_token, self.client_secret_directory) 
+        gauth = Tokenization.load_cred(pydrive_token, self.client_secret_directory)
         if self.Credential.client._credentials.expired or self.Credential.gauth.access_token_expired or creds is None or gauth is None:
             self.Credential = Authorization(self.client_secret_directory)
 
@@ -551,8 +560,8 @@ class Bigquery:
         self._Credential = new_credential
 
     def check_cred(self):
-        creds = Tokenization.load_cred(client_token)
-        gauth = Tokenization.load_cred(pydrive_token)
+        creds = Tokenization.load_cred(client_token, self.client_secret_directory)
+        gauth = Tokenization.load_cred(pydrive_token, self.client_secret_directory)
         if self.Credential.client._credentials.expired or self.Credential.gauth.access_token_expired or creds is None or gauth is None:
             self.Credential = Authorization(self.client_secret_directory)
     
