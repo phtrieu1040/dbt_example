@@ -29,7 +29,11 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
 
-SCOPES=["https://www.googleapis.com/auth/bigquery","https://www.googleapis.com/auth/drive", "https://www.googleapis.com/auth/spreadsheets"]
+SCOPES=["https://www.googleapis.com/auth/bigquery",
+        "https://www.googleapis.com/auth/drive",
+        "https://www.googleapis.com/auth/spreadsheets",
+        # "https://www.googleapis.com/auth/userinfo.email"
+        ]
 # os.chdir(r"C:\trieu.pham\python\bigquery")
 
 client_token='token.pickle'
@@ -110,6 +114,7 @@ class Authorization:
         self._gauth = gauth
         self._drive = GoogleDrive(gauth)
         self._gspread_client = gspread.authorize(creds)
+        # self._people_service = build('people', 'v1', credentials=creds)
     
     @property
     def client(self):
@@ -134,6 +139,10 @@ class Authorization:
     @property
     def gspread_client(self):
         return self._gspread_client
+    
+    # @property
+    # def people_service(self):
+    #     return self._people_service
 
 
 class Googlesheet:
@@ -167,19 +176,26 @@ class Googlesheet:
         emails = df_permissions.emailAddress.tolist()
         return emails
     
-    def get_full_permissions_from_google_sheet(self, url):
+    def get_full_permissions_from_google_sheet_df(self, url):
         sheet = self._get_sheet(url=url)
         permissions = sheet.list_permissions()
         df_permissions = pd.DataFrame(permissions)
         return df_permissions
     
-    def transfer_ownership(self, email, file_id):
+    def get_full_permissions_from_google_sheet_raw(self, url):
+        sheet = self._get_sheet(url=url)
+        permissions = sheet.list_permissions()
+        return permissions
+    
+    def transfer_ownership(self, email, file_id, notify=True):
         client = self.Credential.gspread_client
         try:
             client.insert_permission(file_id=file_id,
                                      value=email,
                                      perm_type='user',
-                                     role='owner')
+                                     role='owner',
+                                     notify=notify,
+                                     )
         except Exception as e:
             print(e + " for file {}".format(file_id))
     
@@ -336,16 +352,47 @@ class Googlesheet:
         service_sheet = self.Credential.service.spreadsheets()
         return service_sheet
     
-    def _modify_permision_by_drive_service(self, sheet_id, role:Literal['reader', 'writer'], type: Literal['anyone', 'user']):
+    def _modify_permision_by_drive_service(self, email, sheet_id, role:Literal['reader', 'writer', 'owner'], type: Literal['anyone', 'user']):
         self.check_cred()
         new_permissions = {
             'role': role,
-            'type': type
+            'type': type,
+            'emailAddress': email,
         }
         try:
-            self.Credential.drive_service.permissions().create(fileId=sheet_id, body=new_permissions).execute()
+            self.Credential.drive_service.permissions().create(fileId=sheet_id,
+                                                               body=new_permissions,
+                                                               transferOwnership=True).execute()
         except Exception as e:
             print(e)
+
+    def get_owned_google_sheets_with_email(self):
+        # Ensure credentials are up to date
+        self.check_cred()
+
+        # Prepare the query to search for Google Sheets owned by the user
+        query = "mimeType='application/vnd.google-apps.spreadsheet' and 'me' in owners"
+        try:
+            # Call the Drive API to list the files matching the query
+            # Include the 'owners.emailAddress' in the fields to retrieve the owner's email addresses
+            response = self.Credential.drive_service.files().list(q=query, spaces='drive', fields='files(id, name, owners(emailAddress))').execute()
+            files = response.get('files', [])
+            
+            # Optionally, print the files found for debugging, including the owner's email
+            for file in files:
+                # Assuming the file has at least one owner, which should always be the case
+                owner_email = file['owners'][0]['emailAddress'] if file['owners'] else 'No owner email'
+                print(u'{0} ({1}) - Owner: {2}'.format(file['name'], file['id'], owner_email))
+                
+            return files
+        except Exception as e:
+            print('An error occurred:', e)
+            return None
+
+    def _add_new_worksheet(self, url, new_sheet_name):
+        sh = self._get_sheet(url)
+        worksheet = sh.add_worksheet(title=new_sheet_name, rows=100, cols=10)
+        return worksheet
     
     def _clear_sheet_by_client(self, sheetID, sheet_name):
         sheet = self._get_sheet_by_service()
