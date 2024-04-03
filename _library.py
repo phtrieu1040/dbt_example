@@ -33,16 +33,11 @@ import datetime as lib_dt
 SCOPES=["https://www.googleapis.com/auth/bigquery",
         "https://www.googleapis.com/auth/drive",
         "https://www.googleapis.com/auth/spreadsheets",
-        # "https://www.googleapis.com/auth/userinfo.email"
         ]
-# os.chdir(r"C:\trieu.pham\python\bigquery")
 
 client_token='token.pickle'
 pydrive_token='pydrive_token.pickle'
 client_secret_file='client_secret.json'
-# os.chdir(r'C:\Python\file_token')
-# client_secret = r'C:\Python\file_token\client_secret.json'
-# client_secret=r"C:\trieu.pham\python\bigquery\client_secret.json"
 
 
 class Tokenization:
@@ -75,20 +70,17 @@ class Tokenization:
 
 class Authorization:
     def __init__(self, client_secret_directory):
-        # os.chdir(client_secret_directory)
         client_token_file_path = os.path.join(client_secret_directory, client_token)
         pydrive_token_file_path = os.path.join(client_secret_directory, pydrive_token)
         checker_client = True
         checker_pydrive = True
         while checker_client:
             creds = Tokenization.load_cred(client_token, client_secret_directory)
-            # gauth = Tokenization.load_cred(pydrive_token)
             if creds is not None and not creds.expired:
                 checker_client = False
                 continue
             elif (creds is not None and creds.expired) or creds is None:
                 try:
-                    # os.remove('{}\{}'.format(client_secret_directory, client_token))
                     os.remove(client_token_file_path)
                 except Exception:
                     print('No Token, Now Create New Cred!')
@@ -102,7 +94,6 @@ class Authorization:
                 continue
             elif (gauth is not None and gauth.access_token_expired) or gauth is None:
                 try:
-                    # os.remove('{}\{}'.format(client_secret_directory, pydrive_token))
                     os.remove(pydrive_token_file_path)
                 except Exception:
                     print('No Drive Token, Now Create New Cred!')
@@ -140,12 +131,7 @@ class Authorization:
     def gspread_client(self):
         return self._gspread_client
     
-    # @property
-    # def people_service(self):
-    #     return self._people_service
-
-
-class Googlesheet:
+class GoogleFile:
     def __init__(self, client_secret_directory):
         self._credentials = Authorization(client_secret_directory)
         self.client_secret_directory = client_secret_directory
@@ -935,7 +921,7 @@ class MyLibrary:
         # client_secret_directory = r'C:\trieu.pham\python\bigquery'
         client_secret_directory = r'C:\Python\file_token'
         self._bigquery = Bigquery(client_secret_directory)
-        self._google = Googlesheet(client_secret_directory)
+        self._google = GoogleFile(client_secret_directory)
     
     @property
     def bigquery(self):
