@@ -27,6 +27,7 @@ import re
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+import datetime as lib_dt
 
 
 SCOPES=["https://www.googleapis.com/auth/bigquery",
@@ -733,15 +734,68 @@ class Bigquery:
         query_job = self._get_bqr_client().query(query_string)
         df = query_job.to_dataframe()
         return df
+    
+    def create_ingestion_time_partitioned_table(self, table_id):
+        # once the table is created, write append to it, 
+        from google.cloud.bigquery import Table, TimePartitioning, TimePartitioningType
+        client = self._get_bqr_client()
+        table = Table(table_id)
+        table.time_partitioning = TimePartitioning(type_=TimePartitioningType.DAY) # must only be day for ingestion time table, can't be any other.
+        table.require_partition_filter = True
+        table = client.create_table(table)
 
-    def update_table_from_dataframe(self,df,table_id,write_disposition,time_partitioning=None):
-        if time_partitioning==None:
+    def _enable_partition_filter(self, table_id):
+        client = self._get_bqr_client()
+        table = client.get_table(table_id)  # Make an API request to fetch the table.
+        table.require_partition_filter = True  # Set the partition filter requirement.
+        client.update_table(table, ["require_partition_filter"])  # Make an API request to update the table.
+
+    def update_table_from_dataframe(
+            self, df, table_id,
+            write_disposition,
+            partition_column_name=None,
+            partition_column_type=None,
+            table_expiration='',
+            partition_expiration='',
+            partition_filter=False
+            ):
+        if partition_column_name and partition_column_type:
+            check_time_partition = True
+        else:
+            check_time_partition = False
+        if check_time_partition==False:
             table = self._update_table_from_dataframe_no_partition(df,table_id,write_disposition)
         else:
             if write_disposition == 'WRITE_TRUNCATE_PARTITION':
-                table = self._update_table_from_dataframe_partititon(df,table_id,time_partitioning)
+                table = self._update_table_from_dataframe_partititon(df,table_id, partition_column_name, partition_column_type)
             else:
-                table = self._update_table_from_dataframe_other(df,table_id,write_disposition,time_partitioning)
+                table = self._update_table_from_dataframe_other(df,table_id,write_disposition, partition_column_name, partition_column_type)
+        
+        if table_expiration:
+            try:
+                self._set_expiration_to_table(table_id=table_id, expiration_day=table_expiration)
+                print('Successfully set expiration to table')
+            except Exception as e:
+                print('Error setting expiration date to table: ', e)
+        else:
+            pass
+
+        try:
+            table = self._get_bqr_client().get_table(table_id)
+            is_partition_filter_required = table.require_partition_filter
+        except Exception as e:
+            print('Error checking if table is required for partition filter: ', e)
+            is_partition_filter_required = False
+
+        if (is_partition_filter_required == True and partition_expiration) or (partition_expiration and check_time_partition):
+            try:
+                self._create_expiration_for_partition_for_table(table_id=table_id, expiration=partition_expiration)
+                if partition_filter: self._enable_partition_filter(table_id=table_id)
+                print('Successfully set expiration to partition')
+            except Exception as e:
+                print('Error create expiration for partition: ', e)
+        else:
+            pass
 
         return table
 
@@ -760,9 +814,11 @@ class Bigquery:
         )
         return table
 
-    def _update_table_from_dataframe_other(self,df,table_id,write_disposition,time_partitioning):
-        field_partition = time_partitioning['field']
-        type_partition = time_partitioning['type']
+    def _update_table_from_dataframe_other(self,df,table_id,write_disposition, partition_column_name, partition_column_type):
+        # field_partition = time_partitioning['field']
+        # type_partition = time_partitioning['type']
+        field_partition = partition_column_name
+        type_partition = partition_column_type
         table = table_id
         job_config = bigquery.LoadJobConfig(write_disposition=write_disposition,
                                             time_partitioning=bigquery.TimePartitioning(
@@ -787,10 +843,34 @@ class Bigquery:
         self._get_bqr_client().load_table_from_dataframe(dataframe=df,
                                                          destination=table_id,
                                                          job_config=job_config)
+        
+    def _create_expiration_for_partition_for_table(self, table_id, expiration=''):
+        # partition with expiration mean once the expiration period is reach, all rows in the table with the expired partitions will be removed
+        if expiration:
+            try:
+                partition_expiration_ms = expiration * 24 * 60 * 60 * 1000 # 30 days in milliseconds
+            except Exception as e:
+                print('Error create partition for table: ', e)
+        else:
+            return
+        client = self._get_bqr_client()
+        table = client.get_table(table_id)
+        if not table.time_partitioning:
+            from google.cloud.bigquery import TimePartitioning
+            table.time_partitioning = TimePartitioning(expiration_ms=partition_expiration_ms)
+        else:
+            table.time_partitioning.expiration_ms = partition_expiration_ms
+        table.time_partitioning.expiration_ms = partition_expiration_ms 
+        try:
+            client.update_table(table, ["time_partitioning"])
+        except Exception as e:
+            print('Error setting expiration to partitions of table: ', e)
 
-    def _update_table_from_dataframe_partititon(self,df,table_id,time_partitioning):
-        field_partition = time_partitioning['field']
-        type_partition = time_partitioning['type']
+    def _update_table_from_dataframe_partititon(self,df,table_id, partition_column_name, partition_column_type):
+        field_partition = partition_column_name
+        type_partition = partition_column_type
+        # field_partition = time_partitioning['field']
+        # type_partition = time_partitioning['type']
         table = table_id
 
         date_overwrite = df[field_partition].astype(str).unique()
@@ -843,6 +923,12 @@ class Bigquery:
             )
         )
         return table
+    
+    def _set_expiration_to_table(self, table_id, expiration_day):
+        client = self._get_bqr_client()
+        table = client.get_table(table_id)
+        table.expires = lib_dt.datetime.now() + lib_dt.timedelta(days=expiration_day)
+        client.update_table(table, ['expires'])
 
 class MyLibrary:
     def __init__(self) -> None:
