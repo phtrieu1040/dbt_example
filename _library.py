@@ -1,7 +1,7 @@
 from __future__ import print_function
 from google_auth_oauthlib.flow import InstalledAppFlow
 from google.auth.transport.requests import Request
-from google.oauth2.credentials import Credentials
+from google.oauth2.credentials import credentials
 from google.cloud import bigquery
 import pandas as pd
 import os
@@ -114,7 +114,6 @@ class Authorization:
         self._gauth = gauth
         self._drive = GoogleDrive(gauth)
         self._gspread_client = gspread.authorize(creds)
-        # self._people_service = build('people', 'v1', credentials=creds)
     
     @property
     def client(self):
@@ -147,26 +146,26 @@ class Authorization:
 
 class Googlesheet:
     def __init__(self, client_secret_directory):
-        self._Credential = Authorization(client_secret_directory)
+        self._credentials = Authorization(client_secret_directory)
         self.client_secret_directory = client_secret_directory
 
     @property
-    def Credential(self):
-        return self._Credential
+    def credentials(self):
+        return self._credentials
     
-    @Credential.setter
-    def Credential(self, new_credential):
-        self._Credential = new_credential
+    @credentials.setter
+    def credentials(self, new_credentials):
+        self._credentials = new_credentials
 
     def check_cred(self):
         creds = Tokenization.load_cred(client_token, self.client_secret_directory) 
         gauth = Tokenization.load_cred(pydrive_token, self.client_secret_directory)
-        if self.Credential.client._credentials.expired or self.Credential.gauth.access_token_expired or creds is None or gauth is None:
-            self.Credential = Authorization(self.client_secret_directory)
+        if self.credentials.client._credentials.expired or self.credentials.gauth.access_token_expired or creds is None or gauth is None:
+            self.credentials = Authorization(self.client_secret_directory)
 
     def _get_sheet(self, url):
         self.check_cred()
-        sheet = self.Credential.gspread_client.open_by_url(url=url)
+        sheet = self.credentials.gspread_client.open_by_url(url=url)
         return sheet
     
     def get_permissions_email_from_google_sheet(self, url):
@@ -188,7 +187,7 @@ class Googlesheet:
         return permissions
     
     def transfer_ownership(self, email, file_id, notify=True):
-        client = self.Credential.gspread_client
+        client = self.credentials.gspread_client
         try:
             client.insert_permission(file_id=file_id,
                                      value=email,
@@ -201,14 +200,14 @@ class Googlesheet:
     
     def delete_google_sheet_file(self, file_id):
         self.check_cred()
-        self.Credential.gspread_client.del_spreadsheet(file_id=file_id)
+        self.credentials.gspread_client.del_spreadsheet(file_id=file_id)
 
     def get_ggs_ids(self):
-        a = list(self.Credential.gspread_client.list_spreadsheet_files())
+        a = list(self.credentials.gspread_client.list_spreadsheet_files())
         return a
     
     def create_new_google_sheet(self, sheet_name, email_to_share, perm_type = 'user', role = 'writer'):
-        sheet = self.Credential.gspread_client.create(sheet_name)
+        sheet = self.credentials.gspread_client.create(sheet_name)
         if type(email_to_share) is list:
             for email in email_to_share:
                 sheet.share(email, perm_type = perm_type, role = role)
@@ -236,7 +235,7 @@ class Googlesheet:
     
     def duplicate_google_sheet(self, source_id, target_file_name, email_to_share=None, copy_permissions=True, source_sheet_to_duplicate=None):
         self.check_cred()
-        sheet = self.Credential.gspread_client.copy(source_id, title=target_file_name, copy_permissions=copy_permissions)
+        sheet = self.credentials.gspread_client.copy(source_id, title=target_file_name, copy_permissions=copy_permissions)
         sheet_url = sheet.url
         print(sheet_url)
         if email_to_share is not None:
@@ -280,15 +279,84 @@ class Googlesheet:
         else:
             self._grant_google_sheet_permission(sheet=sheet, email=email, role=role, notify=notify)
 
+    def _get_file_worksheet_list(self, url):
+        sheet = self._get_sheet(url)
+        worksheets = sheet.worksheets()
+        worksheet_names = [worksheet.title for worksheet in worksheets]
+        return worksheet_names
 
-    def read_google_sheet_by_url(self, url, worksheet_name='', header_row=1):
+    def is_worksheet_completely_empty(self, url, worksheet_name):
+        sh = self._get_sheet(url)
+        wks = sh.worksheet(worksheet_name)
+        # Fetch all values
+        all_values = wks.get_all_values()
+        # Check if all values are empty
+        if not all_values or all([not cell for row in all_values for cell in row]):
+            return True
+        else:
+            return False
+        
+    def _batch_transfer_ownership_callback(self, request_id, response, exception):
+        if exception is not None:
+            # If there's an error, add to the failed_transfer list
+            print(f"An error occurred for {request_id}: {exception}")
+            self.un_successfully_transferred.append(request_id)
+        else:
+            # If successful, add to the successfully_transferred list
+            print(f"Successfully transferred ownership for {request_id}")
+            self.successfully_transferred.append(request_id)
+
+    def batch_transfer_ownership(self, file_id_list, email_to_transfer, role='owner', type='user'):
+        self.successfully_transferred = []
+        self.un_successfully_transferred = []
+        batch = self.credentials.drive_service.new_batch_http_request(callback=self._batch_transfer_ownership_callback)
+        for file_id in file_id_list:
+            new_permissions = {
+                'type': type,
+                'role': role,
+                'emailAddress': email_to_transfer,
+            }
+            request_id = file_id  # Using file_id as the request_id for easy tracking
+            batch.add(
+                self.credentials.drive_service.permissions().create(
+                    fileId=file_id,
+                    body=new_permissions,
+                    transferOwnership=(role == 'owner'),
+                    fields='id, role',
+                ),
+                request_id=request_id
+            )
+        batch.execute()
+
+        # Return or process the lists of transferred and failed IDs as needed
+        return self.successfully_transferred, self.un_successfully_transferred
+
+    # def read_google_sheet_by_url(self, url, worksheet_name='', header_row=1):
+    #     sh = self._get_sheet(url)
+    #     if worksheet_name:
+    #         wks = sh.worksheet(worksheet_name)
+    #     else:
+    #         wks = sh.worksheet(0)
+    #     values = wks.get_all_values()
+    #     data = pd.DataFrame(values[header_row:], columns=values[header_row-1])
+    #     return data
+    
+    def read_google_sheet_by_url(self, url, worksheet_name='', header_row=1, range_name=''):
         sh = self._get_sheet(url)
         if worksheet_name:
             wks = sh.worksheet(worksheet_name)
         else:
-            wks = sh.worksheet(0)
-        values = wks.get_all_values()
-        data = pd.DataFrame(values[header_row:], columns=values[header_row-1])
+            wks = sh.get_worksheet(0)
+
+        if range_name:
+            values = wks.get(range_name)
+            if header_row > 1:
+                values = values[header_row-1:]
+            data = pd.DataFrame(values[1:], columns=values[0])
+        else:
+            values = wks.get_all_values()
+            data = pd.DataFrame(values[header_row:], columns=values[header_row-1])
+
         return data
     
     def write_google_sheet_by_url(self, url, worksheet_name, df_to_write, start_cell='A1', delete_before_write=True, copy_head=True):
@@ -315,7 +383,7 @@ class Googlesheet:
 
     def _get_drive_file(self, file_id):
         self.check_cred()
-        file = self.Credential.drive.CreateFile({'id': file_id})
+        file = self.credentials.drive.CreateFile({'id': file_id})
         return file
 
     def read_google_drive_xlsx(self, file_id, sheet_name):
@@ -349,7 +417,7 @@ class Googlesheet:
 
     def _get_sheet_by_service(self):
         self.check_cred()
-        service_sheet = self.Credential.service.spreadsheets()
+        service_sheet = self.credentials.service.spreadsheets()
         return service_sheet
     
     def _modify_permision_by_drive_service(self, email, sheet_id, role:Literal['reader', 'writer', 'owner'], type: Literal['anyone', 'user']):
@@ -360,34 +428,71 @@ class Googlesheet:
             'emailAddress': email,
         }
         try:
-            self.Credential.drive_service.permissions().create(fileId=sheet_id,
+            self.credentials.drive_service.permissions().create(fileId=sheet_id,
                                                                body=new_permissions,
                                                                transferOwnership=True).execute()
         except Exception as e:
             print(e)
 
-    def get_owned_google_sheets_with_email(self):
-        # Ensure credentials are up to date
-        self.check_cred()
+    def _get_files_and_email_of_owner_all_page(self, all_page=True):
+        mime_types = [
+            "application/vnd.google-apps.spreadsheet",
+            "application/vnd.google-apps.document",
+            "application/vnd.google-apps.presentation",
+        ]
+        file_extensions = [
+            '.xlsx',
+            '.drawio',
+            '.docx',
+            '.pptx',
+            '.pdf',
+            'ipynb'
+        ]
+        query_mime_types = "(" + " or ".join([f"mimeType='{mime_type}'" for mime_type in mime_types]) + ")"
+        query_extension = "(" + " or ".join([f"name contains '{extension}'" for extension in file_extensions]) + ")"
+        query = f"({query_mime_types} and 'me' in owners and trashed=false) or ({query_extension} and 'me' in owners and trashed=false)"
+        # query = f"trashed=true"
+        service = self.credentials.drive_service
+        nextPageToken = None
+        full_file_info = {}
+        original_owner = None
+        pattern = 'results-\d+-\d+|Untitled spreadsheet|bq-results-\d+-\d+'
 
-        # Prepare the query to search for Google Sheets owned by the user
-        query = "mimeType='application/vnd.google-apps.spreadsheet' and 'me' in owners"
         try:
-            # Call the Drive API to list the files matching the query
-            # Include the 'owners.emailAddress' in the fields to retrieve the owner's email addresses
-            response = self.Credential.drive_service.files().list(q=query, spaces='drive', fields='files(id, name, owners(emailAddress))').execute()
-            files = response.get('files', [])
-            
-            # Optionally, print the files found for debugging, including the owner's email
-            for file in files:
-                # Assuming the file has at least one owner, which should always be the case
-                owner_email = file['owners'][0]['emailAddress'] if file['owners'] else 'No owner email'
-                print(u'{0} ({1}) - Owner: {2}'.format(file['name'], file['id'], owner_email))
-                
-            return files
+            while True:
+                response = service.files().list(
+                    q=query,
+                    spaces='drive',
+                    fields='nextPageToken, files(id, name, mimeType, owners(emailAddress))',
+                    pageToken=nextPageToken
+                ).execute()
+
+                files = response.get('files', [])
+
+                if all_page:
+                    nextPageToken = response.get('nextPageToken', None)
+                else:
+                    nextPageToken = None
+
+                for file in files:
+                    name = file.get('name')
+                    if re.match(pattern=pattern, string=name):
+                        # Skip files that match the pattern
+                        continue
+
+                    file_id = file.get('id')
+                    if not original_owner and file.get('owners'):  # Ensure there are owners to avoid key errors
+                        original_owner = file['owners'][0].get('emailAddress', None)
+                    if name and file_id:  # Add file info if both name and ID are available
+                        full_file_info[name] = file_id
+
+                if not nextPageToken:
+                    break
         except Exception as e:
-            print('An error occurred:', e)
-            return None
+            print('Error getting files_data: ', e)
+            return {}, None
+
+        return full_file_info, original_owner
 
     def _add_new_worksheet(self, url, new_sheet_name):
         sh = self._get_sheet(url)
@@ -595,26 +700,26 @@ class GoogleMail:
 
 class Bigquery:
     def __init__(self, client_secret_directory):
-        self._Credential = Authorization(client_secret_directory)
+        self._credentials = Authorization(client_secret_directory)
         self.client_secret_directory = client_secret_directory
 
     @property
-    def Credential(self):
-        return self._Credential
+    def credentials(self):
+        return self._credentials
     
-    @Credential.setter
-    def Credential(self, new_credential):
-        self._Credential = new_credential
+    @credentials.setter
+    def credentials(self, new_credentials):
+        self._credentials = new_credentials
 
     def check_cred(self):
         creds = Tokenization.load_cred(client_token, self.client_secret_directory)
         gauth = Tokenization.load_cred(pydrive_token, self.client_secret_directory)
-        if self.Credential.client._credentials.expired or self.Credential.gauth.access_token_expired or creds is None or gauth is None:
-            self.Credential = Authorization(self.client_secret_directory)
+        if self.credentials.client._credentials.expired or self.credentials.gauth.access_token_expired or creds is None or gauth is None:
+            self.credentials = Authorization(self.client_secret_directory)
     
     def _get_bqr_client(self):
         self.check_cred()
-        client = self.Credential.client
+        client = self.credentials.client
         return client
 
     def drop_bigquery_table(self,table_id):
@@ -754,9 +859,7 @@ class Bigquery:
         )
 
 class MyLibrary:
-    # def __init__(self, type: Literal['Bigquery', 'Google', 'UserDefined']) -> None:
     def __init__(self) -> None:
-        # if client_secret_directory:
         # client_secret_directory = r'C:\trieu.pham\python\bigquery'
         client_secret_directory = r'C:\Python\file_token'
         self._bigquery = Bigquery(client_secret_directory)
@@ -864,69 +967,6 @@ class MyFunction:
             )
             return chart
         
-    
-    
-    """reserve for horizontal waterfall"""
-# import plotly.graph_objects as go
-
-# ccc_data = ccc_all[ccc_all['year_key'] == '2023'][['sub_cate_report', 'doc', 'tp_90', 'ap', 'ccc']].copy()
-# ccc_data['ap'] = ccc_data['ap'] * -1
-# text_list = ccc_data.iloc[0, 1:].astype(str).to_list()
-# text_list[:] = [round(float(x), 2) for x in text_list]
-# total_color = 'orange' if float(ccc_data.iloc[0, 4]) >= 0 else 'green'
-
-# waterfall_ccc = go.Figure(go.Waterfall(
-#     name='CCC',
-#     orientation="h",  # Set orientation to "h" for horizontal
-#     measure=["relative", "relative", "relative", "total"],
-#     x=ccc_data.iloc[0, 1:].to_list(),
-#     y=ccc_data.iloc[:, 1:].columns.to_list(),
-#     textposition="auto",
-#     text=text_list,
-#     textfont=dict(size=16),
-#     connector={"line": {"color": "rgb(63, 63, 63)"}},
-#     increasing={"marker": {"color": "red"}},
-#     decreasing={"marker": {"color": "green"}},
-#     totals={"marker": {"color": total_color}}
-# ))
-
-# waterfall_ccc.add_shape(
-#     type="line", line=dict(color="black", dash="dash"), opacity=0.5,
-#     x0=0.001, x1=0.001, xref="x", y0=-0.4, y1=3.4, yref="y"  # Adjusted coordinates
-# )
-# waterfall_ccc.add_shape(
-#     type="line", line=dict(color="black", dash="dash"), opacity=0.5,
-#     x0=0.001, x1=0.001, xref="x", y0=-0.4, y1=3.4, yref="y"  # Adjusted coordinates
-# )
-# waterfall_ccc.add_shape(
-#     type="line", line=dict(color="blue"), opacity=1,
-#     x0=-0.4, x1=3.4, xref="x", y0=0.001, y1=0.001, yref="y"  # Adjusted coordinates
-# )
-
-# waterfall_ccc.update_layout(
-#     title={
-#         'text': "Cash Conversion Cycle Of ",
-#         'font': {'size': 24, 'family': 'Arial'}
-#     },
-#     xaxis={
-#         'title': {
-#             'text': "Days",
-#             'font': {'size': 16, 'family': 'Arial'}
-#         },
-#         'tickfont': {'size': 14, 'family': 'Arial'}
-#     },
-#     yaxis={
-#         'title': {
-#             'text': "Parameters",
-#             'font': {'size': 16, 'family': 'Arial'}
-#         },
-#         'tickfont': {'size': 20, 'family': 'Arial'}
-#     },
-#     showlegend=True
-# )
-# waterfall_ccc.show()
-
-
     @classmethod
     def _to_list(cls, value):
         result = []
@@ -1028,6 +1068,31 @@ class MyFunction:
             return sheet_id
         else:
             return None
+
+    @staticmethod
+    def extract_google_drive_id(url):
+        # Define the patterns for Google Drive documents
+        google_drive_patterns = [
+            "/spreadsheets/d/",
+            "/document/d/",
+            "/presentation/d/"
+        ]
+
+        for pattern in google_drive_patterns:
+            start_index = url.find(pattern)
+            if start_index != -1:
+                start_index += len(pattern)  # Move index to start of the ID
+                end_index = url.find("/", start_index)  # Find the end of the ID
+                if end_index == -1:  # If no "/" found, assume rest of URL is the ID
+                    end_index = url.find("?", start_index)  # Alternative end, looking for query params
+                    if end_index == -1:  # No query params found either
+                        return url[start_index:]  # Return the rest of the URL as the ID
+                    else:
+                        return url[start_index:end_index]  # Return up to the start of query params
+                else:  # If "/" found, return the ID portion up to that "/"
+                    return url[start_index:end_index]
+
+        return None
     
     @classmethod
     def _read_csv(cls, file_path):
@@ -1301,7 +1366,113 @@ class MyFunction:
             print('error: ', e)
             return
         return single_string
-        
+"""create web server with ngrok service"""
+# !pip install Flask==3.0.0 pyngrok==7.1.2 --quiet
+# from flask import Flask, request
+# from pyngrok import ngrok
+# class WebServer:
+#     def __init__(self):
+#         self.ngrok_key = '2e5LT2zgYwFyeqwyuQstRF1H9VB_7ygrgxJ5qPDtmkQXAucUa'
+#         self.port = 5000
+#         self.session_duration = 100
+#         self.token = token
+#         self.attempts = 0
+
+#     def webserver_ngrok(self):
+#         ngrok.set_auth_token(self.ngrok_key)
+#         app = Flask(__name__)
+#         @app.route("/", methods=['GET', 'POST'])
+#         def user_interface():
+#         while self.attempts <=3:
+#             if self.attempts == 3:
+#             with open("user_input.txt", "w") as file:
+#                 file.write(termination_token)
+#             return f'You have entered too many incorrect token, this session is now terminated!'
+#             if request.method == "POST":
+#                 user_input = request.form["user_input"]
+#                 if user_input != self.token:
+#                 self.attempts+=1
+#                 return f'Incorrect token, please reload and re-enter.{self.attempts}'
+#                 # Write the input to a file
+#                 with open("user_input.txt", "w") as file:
+#                     file.write(user_input)
+#                 print(f"Input received: {user_input}")  # Attempt to print to Colab's output
+#                 return f"Received input: {user_input}"
+#             # If it's a GET request, show the form
+#             return '''
+#                 <form method="post">
+#                     Enter Verification Code: <input type="text" name="user_input"><br>
+#                     <input type="submit" value="Submit">
+#                 </form>
+#             '''
+#         return app
+
+#     def create_ngrok_tunnel(self):
+#         tunnel = ngrok.connect(self.port)
+#         return tunnel
+
+#     def disconnect_webserver(self, url):
+#         ngrok.disconnect(url)
+
+#     def create_webserver_thread(self):
+#         import threading
+#         app = self.webserver_ngrok()
+#         tunnel = self.create_ngrok_tunnel()
+#         webserver_url = tunnel.public_url
+#         thread_ngrok = threading.Thread(target=lambda: app.run(port=self.port, use_reloader=False))
+#         thread_ngrok.start()
+#         timer = threading.Timer(self.session_duration, self.disconnect_webserver, args=(webserver_url,))
+#         timer.start()
+#         return webserver_url
+
+#     def disconnect_ngrok():
+#     ngrok.disconnect(url)
+
+#     def temp_test():
+#     # Set the ngrok auth token
+#     ngrok.set_auth_token(ngrok_key)
+
+#     app = Flask(__name__)
+
+#     # Route to display the form and handle input
+#     @app.route("/", methods=["GET", "POST"])
+#     def hello():
+#         if request.method == "POST":
+#             user_input = request.form["user_input"]
+#             # Write the input to a file
+#             with open("user_input.txt", "w") as file:
+#                 file.write(user_input)
+#             print(f"Input received: {user_input}")  # Attempt to print to Colab's output
+#             return f"Received input: {user_input}"
+#         # If it's a GET request, show the form
+#         return '''
+#             <form method="post">
+#                 Enter Token Code: <input type="text" name="user_input"><br>
+#                 <input type="submit" value="Submit">
+#             </form>
+#         '''
+
+#     # Start ngrok tunnel
+#     tunnel = ngrok.connect(port)
+#     public_url = tunnel.public_url
+#     print(f"ngrok tunnel \"{public_url}\" -> \"http://localhost:{port}\"")
+
+#     # Write the ngrok URL to a file
+#     # with open("ngrok_url.txt", "w") as f ile:
+#     #     file.write(public_url)
+
+#     # Optionally, display the URL in Python code or notebook cell
+#     print(f"Access the web server via: {public_url}")
+
+#     # Start Flask app in a way that allows you to continue executing other commands
+#     # Note: The use_reloader=False is to avoid running the initialization code twice in development mode
+#     import threading
+#     ngrok_thread = threading.Thread(target=lambda: app.run(port=port, use_reloader=False))
+#     ngrok_thread.start()
+#     timer = threading.Timer(100, disconnect_ngrok, args=(public_url,))
+#     timer.start()
+
+#     return public_url
 
 class MyProject:
 
