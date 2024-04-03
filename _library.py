@@ -844,20 +844,6 @@ class Bigquery:
         )
         return table
 
-    def load_table_from_uri(self, uri, sheet_name, table_name):
-        job_config = bigquery.LoadJobConfig(
-            source_format=bigquery.ExternalSourceFormat.GOOGLE_SHEETS,
-            autodetect = True,
-            skip_leading_rows=1,
-            create_disposition = "CREATE_IF_NEEDED",
-            write_disposition = 'WRITE_TRUNCATE'
-        )
-        self._get_bqr_client().load_table_from_uri(
-            source_uris=uri,
-            destination=table_name,
-            job_config=job_config
-        )
-
 class MyLibrary:
     def __init__(self) -> None:
         # client_secret_directory = r'C:\trieu.pham\python\bigquery'
@@ -1317,8 +1303,8 @@ class MyFunction:
         df.columns = df.columns.map(cls._transform_column_name_first_letter)
         cls._make_column_name_unique(df)
     
-    @classmethod
-    def _get_input_num_type(cls, message):
+    @staticmethod
+    def _get_input_num_type(message):
         while True:
             limit = input(f'{message}')
             try:
@@ -1329,8 +1315,8 @@ class MyFunction:
             break
         return input_number
     
-    @classmethod
-    def _extract_email(cls, text):
+    @staticmethod
+    def _extract_email(text):
         pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
         match = re.search(pattern, text)
         if match:
@@ -1338,13 +1324,13 @@ class MyFunction:
         else:
             return None
         
-    @classmethod
-    def _string_replace(cls, string, **kwargs):
+    @staticmethod
+    def _string_replace(string, **kwargs):
         result = ''.join(kwargs.get(c, c) for c in string)
         return result
     
-    @classmethod
-    def convert_long_date_to_gmt7(cls, date_string):
+    @staticmethod
+    def convert_long_date_to_gmt7(date_string):
         date_string = date_string.split('(')[0].strip()
         time_adjust = int(date_string[-5:-2])
         
@@ -1354,8 +1340,8 @@ class MyFunction:
         result = dt_gmt_plus_7.strftime("%a, %d %b %Y %H:%M:%S")
         return result
     
-    @classmethod
-    def list_to_single_string(cls, input, delimiter):
+    @staticmethod
+    def list_to_single_string(input, delimiter):
         if isinstance(input,(list,tuple)):
             pass
         else:
