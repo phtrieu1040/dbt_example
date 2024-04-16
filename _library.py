@@ -830,7 +830,7 @@ class Bigquery:
                                                          destination=table_id,
                                                          job_config=job_config)
         
-    def _create_expiration_for_partition_for_table(self, table_id, expiration=''):
+    def _create_expiration_for_partition_for_table(self, table_id, expiration=None):
         # partition with expiration mean once the expiration period is reach, all rows in the table with the expired partitions will be removed
         if expiration:
             try:
@@ -838,14 +838,17 @@ class Bigquery:
             except Exception as e:
                 print('Error create partition for table: ', e)
         else:
-            return
+            partition_expiration_ms = expiration
+            # return
         client = self._get_bqr_client()
         table = client.get_table(table_id)
         if not table.time_partitioning:
             from google.cloud.bigquery import TimePartitioning
             table.time_partitioning = TimePartitioning(expiration_ms=partition_expiration_ms)
         else:
-            table.time_partitioning.expiration_ms = partition_expiration_ms
+            pass
+            # table.time_partitioning.expiration_ms = partition_expiration_ms
+        
         table.time_partitioning.expiration_ms = partition_expiration_ms 
         try:
             client.update_table(table, ["time_partitioning"])
@@ -1374,6 +1377,32 @@ class MyFunction:
         df.columns = df.columns.map(cls._remove_accents)
         df.columns = df.columns.map(cls._transform_column_name_first_letter)
         cls._make_column_name_unique(df)
+
+    @staticmethod
+    def execute_function_and_log(func, success_message, failed_message, log_success_execution=False, path=None, log_name=None):
+        import logging
+        if path:
+            if log_name:
+                file_name = path+'/'+log_name
+            else:
+                file_name = path+'/app.log'
+        else:
+            if log_name:
+                file_name = log_name
+            else:
+                file_name = 'app.log'
+
+        logging.basicConfig(level=logging.DEBUG, filename=file_name, filemode='w',
+                            format='%(asctime)s - %(levelname)s - %(message)s')
+        try:
+            func
+            if log_success_execution:
+                logging.info(f'Successfully {success_message}')
+            else:
+                pass
+        except Exception as e:
+            logging.error(f'Error {failed_message}', exc_info=True)
+
     
     @staticmethod
     def _get_input_num_type(message):
