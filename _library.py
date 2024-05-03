@@ -426,6 +426,7 @@ class GoogleFile:
             "application/vnd.google-apps.spreadsheet",
             "application/vnd.google-apps.document",
             "application/vnd.google-apps.presentation",
+            # "application/vnd.google-apps.shortcut"
         ]
         file_extensions = [
             '.xlsx',
@@ -1379,7 +1380,7 @@ class MyFunction:
         cls._make_column_name_unique(df)
 
     @staticmethod
-    def execute_function_and_log(func, success_message, failed_message, log_success_execution=False, path=None, log_name=None):
+    def execute_function_and_log(func, success_message=None, failed_message=None, log_success_execution=False, path=None, log_name=None):
         import logging
         if path:
             if log_name:
@@ -1442,13 +1443,13 @@ class MyFunction:
         return result
     
     @staticmethod
-    def list_to_single_string(input, delimiter):
+    def list_to_single_string(input, delimiter=None, wrapper = None):
         if isinstance(input,(list,tuple)):
             pass
         else:
             print('input must be a list or tuple')
         try:
-            single_string = delimiter.join(input)
+            single_string = delimiter.join(f"{wrapper}{item}{wrapper}" for item in input)
         except Exception as e:
             print('error: ', e)
             return
