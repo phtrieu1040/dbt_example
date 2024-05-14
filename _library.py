@@ -86,7 +86,7 @@ class Authorization:
                     print('No Token, Now Create New Cred!')
                 Tokenization.create_cred(type='client', client_secret_directory=client_secret_directory)
             else: break
-            
+
         while checker_pydrive:
             gauth = Tokenization.load_cred(pydrive_token, client_secret_directory)
             if gauth is not None and not gauth.access_token_expired:
@@ -711,16 +711,62 @@ class Bigquery:
         return client
 
     def drop_bigquery_table(self,table_id):
-        self._get_bqr_client().delete_table(table_id)
+        client = self._get_bqr_client()
+        try:
+            query_job = client.delete_table(table_id)
+            query_job.result()
+        except Exception as e:
+            print('Error dropping table: ',e)
+    
+    def _get_table_schema(self, table_id):
+        client = self._get_bqr_client()
+        table_schema = None
+        try:
+            table = client.get_table(table_id)
+        except Exception as e:
+            print('Error fetching table: ',e)
+            return
+        table_schema = list(table.schema)
+        return table_schema
 
-    def bigquery_operation(self,query):
-        self._get_bqr_client().query(query)
+    def add_column_to_table(self, table_id, **kwargs):
+        client = self._get_bqr_client()
+        table = client.get_table(table_id)
+        new_schema = self._get_table_schema(table_id=table_id)
+        if new_schema:
+            pass
+        else:
+            return
+        # new_column_list = [[i, kwargs[i]] for i in kwargs]
+        for i in kwargs:
+            new_schema.append(bigquery.SchemaField(i, kwargs[i]))
+
+        table.schema = new_schema
+        try:
+            table = client.update_table(table, ["schema"])
+            print('Update table schema successful!')
+        except Exception as e:
+            print('Error update table schema: ', e)
+
+
+    def bigquery_operation(self, query):
+        client = self._get_bqr_client()
+        try:
+            query_job = client.query(query)
+            query_job.result()
+        except Exception as e:
+            print('Error running query: ',e)
 
     def run_biqquery_to_df(self,query):
         query_string = query
-        query_job = self._get_bqr_client().query(query_string)
-        df = query_job.to_dataframe()
-        return df
+        client = self._get_bqr_client()
+        try:
+            query_job = client.query(query_string)
+            query_job.result()
+            df = query_job.to_dataframe()
+            return df
+        except Exception as e:
+            print('Error while fetching data to df: ', e)
     
     def create_ingestion_time_partitioned_table(self, table_id):
         # once the table is created, write append to it, 
@@ -922,8 +968,8 @@ class Bigquery:
 
 class MyLibrary:
     def __init__(self) -> None:
-        # client_secret_directory = r'C:\trieu.pham\python\bigquery'
-        client_secret_directory = r'C:\Python\file_token'
+        client_secret_directory = r'C:\trieu.pham\python\bigquery'
+        # client_secret_directory = r'C:\Python\file_token'
         self._bigquery = Bigquery(client_secret_directory)
         self._google = GoogleFile(client_secret_directory)
     
