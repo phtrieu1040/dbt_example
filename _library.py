@@ -519,7 +519,30 @@ class GoogleFile:
             .batchUpdate(spreadsheetId=sheetID,body=batch_update_values_request_body)
             .execute())
         return result
+    
+    def read_drive_csv(self, file_id, output_file='temp.csv'):
+        from googleapiclient.http import MediaIoBaseDownload
+        request = self.credentials.drive_service.files().get_media(fileId=file_id)
+        with open(output_file, 'wb') as f:
+            downloader = MediaIoBaseDownload(f, request)
+            done = False
+            while done is False:
+                status, done = downloader.next_chunk()
+                print(f'Download {int(status.progress() * 100)}%.')
 
+        df = pd.read_csv(output_file, dtype='str')
+        os.remove(output_file)
+        return df
+    
+    @staticmethod
+    def read_drive_csv_other(file_id):
+        import gdown
+        url = f"https://drive.google.com/uc?id={file_id}"
+        output = 'temp.csv'
+        gdown.download(url, output, quiet=False)
+        df = pd.read_csv(output, dtype='str')
+        os.remove(output)
+        return df
 
 class GoogleMail:
     def __init__(self, email_address, password) -> None:
@@ -739,7 +762,7 @@ class Bigquery:
 
     def update_table_from_dataframe(
             self, df, table_id,
-            write_disposition,
+            write_disposition='WRITE_TRUNCATE',
             partition_column_name=None,
             partition_column_type=None,
             table_expiration='',
