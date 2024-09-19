@@ -1003,9 +1003,9 @@ class Bigquery:
         client.update_table(table, ['expires'])
 
 class MyLibrary:
-    def __init__(self) -> None:
+    def __init__(self,client_secret_directory) -> None:
         # client_secret_directory = r'C:\trieu.pham\python\bigquery'
-        client_secret_directory = r'C:\Python\file_token'
+        # client_secret_directory = r'C:\Python\file_token'
         self._bigquery = Bigquery(client_secret_directory)
         self._google = GoogleFile(client_secret_directory)
     
