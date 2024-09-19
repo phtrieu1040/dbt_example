@@ -520,18 +520,31 @@ class GoogleFile:
             .execute())
         return result
     
-    def read_drive_csv(self, file_id, output_file='temp.csv'):
+    def read_drive_file(self, file_url, output_file: Literal['temp.csv', 'temp.xlsx'], worksheet_name=None, header_row=0):
         from googleapiclient.http import MediaIoBaseDownload
+        file_id = MyFunction.extract_google_drive_id(file_url)
         request = self.credentials.drive_service.files().get_media(fileId=file_id)
+        df = pd.DataFrame()
         with open(output_file, 'wb') as f:
             downloader = MediaIoBaseDownload(f, request)
             done = False
             while done is False:
                 status, done = downloader.next_chunk()
                 print(f'Download {int(status.progress() * 100)}%.')
-
-        df = pd.read_csv(output_file, dtype='str')
-        os.remove(output_file)
+        try:
+            if output_file == 'temp.csv':
+                df = pd.read_csv(output_file, dtype='str')
+            elif output_file == 'temp.xlsx':
+                if worksheet_name:
+                    df = pd.read_excel(output_file, dtype='str', sheet_name=worksheet_name, header=header_row)
+                else:
+                    df = pd.read_excel(output_file, dtype='str', header=header_row)
+            else:
+                print('Incorrect output_file, stop process')
+                os.remove(output_file)
+        except Exception as e:
+            os.remove(output_file)
+            print(e)
         return df
     
     @staticmethod
@@ -991,8 +1004,8 @@ class Bigquery:
 
 class MyLibrary:
     def __init__(self) -> None:
-        client_secret_directory = r'C:\trieu.pham\python\bigquery'
-        # client_secret_directory = r'C:\Python\file_token'
+        # client_secret_directory = r'C:\trieu.pham\python\bigquery'
+        client_secret_directory = r'C:\Python\file_token'
         self._bigquery = Bigquery(client_secret_directory)
         self._google = GoogleFile(client_secret_directory)
     
@@ -1206,7 +1219,8 @@ class MyFunction:
         google_drive_patterns = [
             "/spreadsheets/d/",
             "/document/d/",
-            "/presentation/d/"
+            "/presentation/d/",
+            "/file/d/"
         ]
 
         for pattern in google_drive_patterns:
