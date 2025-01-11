@@ -28,6 +28,14 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import datetime as lib_dt
+from google.oauth2.credentials import Credentials
+from google.oauth2.service_account import Credentials as ServiceAccountCredentials
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from webdriver_manager.chrome import ChromeDriverManager
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 
 SCOPES=["https://www.googleapis.com/auth/bigquery",
@@ -37,13 +45,106 @@ SCOPES=["https://www.googleapis.com/auth/bigquery",
 
 client_token='token.pickle'
 pydrive_token='pydrive_token.pickle'
-client_secret_file='client_secret.json'
+# client_secret_file='client_secret.json'
+client_secret_file='tevi_data.json'
+
+
+# class Tokenization:
+#     @staticmethod
+#     def load_cred(name, client_secret_directory):
+#         creds_directory = os.path.join(client_secret_directory,name)
+#         try:
+#             creds = pickle.load(open(creds_directory, 'rb'))
+#         except:
+#             return None
+#         return creds
+
+#     @staticmethod
+#     def create_cred(type, client_secret_directory):
+#         client_secret_file_path = os.path.join(client_secret_directory, client_secret_file)
+#         token_file_path = os.path.join(client_secret_directory, client_token)
+#         pydrive_token_file_path = os.path.join(client_secret_directory, pydrive_token)
+#         if type == 'client':
+#             flow = InstalledAppFlow.from_client_secrets_file(client_secret_file_path, SCOPES)
+#             creds = flow.run_local_server(port=0)
+#             with open(token_file_path, 'wb') as token:
+#                 pickle.dump(creds, token)
+
+#         elif type == 'pydrive':
+#             gauth = GoogleAuth()
+#             gauth.DEFAULT_SETTINGS['client_config_file'] = client_secret_file_path
+#             gauth.LocalWebserverAuth()
+#             with open(pydrive_token_file_path, 'wb') as token:
+#                 pickle.dump(gauth, token)
+
+# class Authorization:
+#     def __init__(self, client_secret_directory):
+#         client_token_file_path = os.path.join(client_secret_directory, client_token)
+#         pydrive_token_file_path = os.path.join(client_secret_directory, pydrive_token)
+#         checker_client = True
+#         checker_pydrive = True
+#         while checker_client:
+#             creds = Tokenization.load_cred(client_token, client_secret_directory)
+#             if creds is not None and not creds.expired:
+#                 checker_client = False
+#                 continue
+#             elif (creds is not None and creds.expired) or creds is None:
+#                 try:
+#                     os.remove(client_token_file_path)
+#                 except Exception:
+#                     print('No Token, Now Create New Cred!')
+#                 Tokenization.create_cred(type='client', client_secret_directory=client_secret_directory)
+#             else: break
+
+#         while checker_pydrive:
+#             gauth = Tokenization.load_cred(pydrive_token, client_secret_directory)
+#             if gauth is not None and not gauth.access_token_expired:
+#                 checker_pydrive = False
+#                 continue
+#             elif (gauth is not None and gauth.access_token_expired) or gauth is None:
+#                 try:
+#                     os.remove(pydrive_token_file_path)
+#                 except Exception:
+#                     print('No Drive Token, Now Create New Cred!')
+#                 Tokenization.create_cred(type='pydrive', client_secret_directory=client_secret_directory)
+#             else: break
+        
+#         self._client = bigquery.Client(project='tiki-analytics-dwh', credentials=creds)
+#         self._service = build('sheets', 'v4', credentials=creds)
+#         self._drive_service = build('drive', 'v3', credentials=creds)
+#         self._gauth = gauth
+#         self._drive = GoogleDrive(gauth)
+#         self._gspread_client = gspread.authorize(creds)
+    
+#     @property
+#     def client(self):
+#         return self._client
+    
+#     @property
+#     def service(self):
+#         return self._service
+    
+#     @property
+#     def drive_service(self):
+#         return self._drive_service
+    
+#     @property
+#     def gauth(self):
+#         return self._gauth
+
+#     @property
+#     def drive(self):
+#         return self._drive
+    
+#     @property
+#     def gspread_client(self):
+#         return self._gspread_client
 
 
 class Tokenization:
     @staticmethod
     def load_cred(name, client_secret_directory):
-        creds_directory = os.path.join(client_secret_directory,name)
+        creds_directory = os.path.join(client_secret_directory, name)
         try:
             creds = pickle.load(open(creds_directory, 'rb'))
         except:
@@ -60,7 +161,6 @@ class Tokenization:
             creds = flow.run_local_server(port=0)
             with open(token_file_path, 'wb') as token:
                 pickle.dump(creds, token)
-
         elif type == 'pydrive':
             gauth = GoogleAuth()
             gauth.DEFAULT_SETTINGS['client_config_file'] = client_secret_file_path
@@ -69,11 +169,25 @@ class Tokenization:
                 pickle.dump(gauth, token)
 
 class Authorization:
-    def __init__(self, client_secret_directory):
+    def __init__(self, client_secret_directory, use_service_account=True):
+        self._client = None
+        self._service = None
+        self._drive_service = None
+        self._gauth = None
+        self._drive = None
+        self._gspread_client = None
+        
+        if use_service_account:
+            self._initialize_service_account(client_secret_directory)
+        else:
+            self._initialize_oauth(client_secret_directory)
+
+    def _initialize_oauth(self, client_secret_directory):
         client_token_file_path = os.path.join(client_secret_directory, client_token)
         pydrive_token_file_path = os.path.join(client_secret_directory, pydrive_token)
         checker_client = True
         checker_pydrive = True
+
         while checker_client:
             creds = Tokenization.load_cred(client_token, client_secret_directory)
             if creds is not None and not creds.expired:
@@ -85,7 +199,8 @@ class Authorization:
                 except Exception:
                     print('No Token, Now Create New Cred!')
                 Tokenization.create_cred(type='client', client_secret_directory=client_secret_directory)
-            else: break
+            else:
+                break
 
         while checker_pydrive:
             gauth = Tokenization.load_cred(pydrive_token, client_secret_directory)
@@ -98,27 +213,38 @@ class Authorization:
                 except Exception:
                     print('No Drive Token, Now Create New Cred!')
                 Tokenization.create_cred(type='pydrive', client_secret_directory=client_secret_directory)
-            else: break
+            else:
+                break
         
-        self._client = bigquery.Client(project='tiki-analytics-dwh', credentials=creds)
+        self._client = bigquery.Client(credentials=creds)
         self._service = build('sheets', 'v4', credentials=creds)
         self._drive_service = build('drive', 'v3', credentials=creds)
         self._gauth = gauth
         self._drive = GoogleDrive(gauth)
         self._gspread_client = gspread.authorize(creds)
-    
+
+    def _initialize_service_account(self, client_secret_directory):
+        client_secret_file_path = os.path.join(client_secret_directory, client_secret_file)
+        credentials = ServiceAccountCredentials.from_service_account_file(
+            client_secret_file_path, scopes=SCOPES
+        )
+        self._client = bigquery.Client(credentials=credentials, project=credentials.project_id)
+        self._service = build('sheets', 'v4', credentials=credentials)
+        self._drive_service = build('drive', 'v3', credentials=credentials)
+        self._gspread_client = gspread.authorize(credentials)
+
     @property
     def client(self):
         return self._client
-    
+
     @property
     def service(self):
         return self._service
-    
+
     @property
     def drive_service(self):
         return self._drive_service
-    
+
     @property
     def gauth(self):
         return self._gauth
@@ -126,13 +252,15 @@ class Authorization:
     @property
     def drive(self):
         return self._drive
-    
+
     @property
     def gspread_client(self):
         return self._gspread_client
+
     
 class GoogleFile:
-    def __init__(self, client_secret_directory):
+    def __init__(self, client_secret_directory, use_service_account = True):
+        self.use_service_account = use_service_account
         self._credentials = Authorization(client_secret_directory)
         self.client_secret_directory = client_secret_directory
 
@@ -145,10 +273,14 @@ class GoogleFile:
         self._credentials = new_credentials
 
     def check_cred(self):
-        creds = Tokenization.load_cred(client_token, self.client_secret_directory) 
-        gauth = Tokenization.load_cred(pydrive_token, self.client_secret_directory)
-        if self.credentials.client._credentials.expired or self.credentials.gauth.access_token_expired or creds is None or gauth is None:
-            self.credentials = Authorization(self.client_secret_directory)
+        if self.use_service_account:
+            # For service account, no token expiration checks are required
+            return
+        else:
+            creds = Tokenization.load_cred(client_token, self.client_secret_directory) 
+            gauth = Tokenization.load_cred(pydrive_token, self.client_secret_directory)
+            if self.credentials.client._credentials.expired or self.credentials.gauth.access_token_expired or creds is None or gauth is None:
+                self.credentials = Authorization(self.client_secret_directory)
 
     def _get_sheet(self, url):
         self.check_cred()
@@ -557,6 +689,108 @@ class GoogleFile:
         os.remove(output)
         return df
 
+class CrawlingWeb:
+    class Selenium:
+        def __init__(self):
+            self.options = webdriver.ChromeOptions()
+            self.options.add_argument("--headless")
+            self.options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36")
+            self.driver = None
+        
+        def _get_selenium_driver(self):
+            # Initialize and return the Selenium WebDriver
+            if self.driver is None:
+                self.driver = webdriver.Chrome(
+                    service=Service(ChromeDriverManager().install()),
+                    options=self.options
+                )
+            return self.driver
+        
+    class CrawlBDSdotVN:
+
+        def __init__(self):
+            selenium = CrawlingWeb.Selenium()
+            self.driver = selenium._get_selenium_driver()
+
+        def _get_all_property_urls(self, url_list):
+            all_property_urls = []
+            for url in url_list:
+                try:
+                    self.driver.get(url)
+                    WebDriverWait(self.driver, 20).until(
+                        EC.presence_of_all_elements_located((By.CLASS_NAME, "js__product-link-for-product-id"))
+                    )
+                    # Extract all property links
+                    links = self.driver.find_elements(By.CLASS_NAME, "js__product-link-for-product-id")
+                    hrefs = [link.get_attribute("href") for link in links]
+                    all_property_urls.extend(hrefs)
+                except Exception as e:
+                    print(f"An error occurred while collecting links from {url}: {e}")
+            return all_property_urls
+        
+        def _get_property_data_from_web(self, url_list):
+            all_property_urls = self._get_all_property_urls(url_list=url_list)
+
+            property_data = []
+
+            for property_url in all_property_urls:
+                if property_url == 'https://www.hlbank.com.vn/loan-leadform':
+                    continue
+                else: pass
+
+                try:
+                    self.driver.get(property_url)
+                    WebDriverWait(self.driver, 20).until(
+                        EC.presence_of_element_located((By.CLASS_NAME, "re__pr-specs-content-v2"))
+                    )
+
+                    # Extract property details
+                    spec_items = self.driver.find_elements(By.CLASS_NAME, "re__pr-specs-content-item")
+                    property_details = {}
+                    for item in spec_items:
+                        try:
+                            title = item.find_element(By.CLASS_NAME, "re__pr-specs-content-item-title").text
+                            value = item.find_element(By.CLASS_NAME, "re__pr-specs-content-item-value").text
+                            property_details[title] = value
+                        except Exception:
+                            continue  # Skip if title or value is missing
+
+                    # Extract the district from the breadcrumb
+                    breadcrumb_items = self.driver.find_elements(By.CLASS_NAME, "re__link-se")
+                    district = None
+                    for item in breadcrumb_items:
+                        if item.get_attribute("level") == "3":  # Check for district level
+                            district = item.text
+                            break
+
+                    # Extract the address_text
+                    address_text = None
+                    try:
+                        address_text_element = self.driver.find_element(By.CLASS_NAME, "js__pr-address")
+                        address_text = address_text_element.text
+                    except Exception:
+                        pass  # Skip if address text is not available
+
+                    # Add district and address_text to the dictionary
+                    property_details["District"] = district
+                    property_details["Address"] = address_text
+                    property_details["URL"] = property_url  # Include the URL for reference
+
+                    # Append to the list
+                    property_data.append(property_details)
+
+                except Exception as e:
+                    print(f"An error occurred while collecting details from {property_url}: {e}")
+                
+            return property_data
+
+        def __del__(self):
+            if self.driver:
+                print("Quitting WebDriver...")
+                self.driver.quit()
+
+
+
 class GoogleMail:
     def __init__(self, email_address, password) -> None:
         self.email_address = email_address
@@ -723,7 +957,8 @@ class GoogleMail:
             print(f"Error sending email: {e}")
 
 class Bigquery:
-    def __init__(self, client_secret_directory):
+    def __init__(self, client_secret_directory, use_service_account = True):
+        self.use_service_account = use_service_account
         self._credentials = Authorization(client_secret_directory)
         self.client_secret_directory = client_secret_directory
 
@@ -736,10 +971,14 @@ class Bigquery:
         self._credentials = new_credentials
 
     def check_cred(self):
-        creds = Tokenization.load_cred(client_token, self.client_secret_directory)
-        gauth = Tokenization.load_cred(pydrive_token, self.client_secret_directory)
-        if self.credentials.client._credentials.expired or self.credentials.gauth.access_token_expired or creds is None or gauth is None:
-            self.credentials = Authorization(self.client_secret_directory)
+        if self.use_service_account:
+            # For service account, no token expiration checks are required
+            return
+        else:
+            creds = Tokenization.load_cred(client_token, self.client_secret_directory) 
+            gauth = Tokenization.load_cred(pydrive_token, self.client_secret_directory)
+            if self.credentials.client._credentials.expired or self.credentials.gauth.access_token_expired or creds is None or gauth is None:
+                self.credentials = Authorization(self.client_secret_directory)
     
     def _get_bqr_client(self):
         self.check_cred()
