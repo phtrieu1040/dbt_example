@@ -17,7 +17,7 @@ import gspread
 from xlsxwriter.utility import xl_cell_to_rowcol, xl_rowcol_to_cell
 import csv
 from typing import Literal
-from datetime import datetime, date, timedelta
+from datetime import datetime, date, timedelta, timezone
 import pytz
 import imaplib
 import email
@@ -747,6 +747,10 @@ class CrawlingWeb:
                     # Extract property details
                     spec_items = self.driver.find_elements(By.CLASS_NAME, "re__pr-specs-content-item")
                     property_details = {}
+                    property_details["URL"] = property_url
+                    gmt_plus_7 = timezone(timedelta(hours=7))
+                    current_datetime = datetime.now(gmt_plus_7).strftime('%Y-%m-%d %H:%M:%S')
+                    property_details['datetime'] = current_datetime
                     for item in spec_items:
                         try:
                             title = item.find_element(By.CLASS_NAME, "re__pr-specs-content-item-title").text
@@ -774,7 +778,6 @@ class CrawlingWeb:
                     # Add district and address_text to the dictionary
                     property_details["District"] = district
                     property_details["Address"] = address_text
-                    property_details["URL"] = property_url  # Include the URL for reference
 
                     # Append to the list
                     property_data.append(property_details)
