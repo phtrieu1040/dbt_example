@@ -715,6 +715,7 @@ class CrawlingWeb:
         def _get_all_property_urls(self, url_list):
             all_property_urls = []
             for url in url_list:
+                
                 try:
                     self.driver.get(url)
                     WebDriverWait(self.driver, 20).until(
@@ -723,18 +724,25 @@ class CrawlingWeb:
                     # Extract all property links
                     links = self.driver.find_elements(By.CLASS_NAME, "js__product-link-for-product-id")
                     hrefs = [link.get_attribute("href") for link in links]
-                    all_property_urls.extend(hrefs)
+                    for href in hrefs:
+                        url_dictionary = {}
+                        url_dictionary['source'] = url
+                        url_dictionary['property_url'] = href
+                        all_property_urls.append(url_dictionary)
                 except Exception as e:
                     print(f"An error occurred while collecting links from {url}: {e}")
+                
             return all_property_urls
         
-        def _get_property_data_from_web(self, url_list):
+        def _get_property_data_from_web(self, url_list, property_data):
             all_property_urls = self._get_all_property_urls(url_list=url_list)
 
-            property_data = []
+
+            # property_data = []
             gmt_plus_7 = timezone(timedelta(hours=7))
             current_datetime = datetime.now(gmt_plus_7).strftime('%Y-%m-%d %H:%M:%S')
-            for property_url in all_property_urls:
+            for property in all_property_urls:
+                property_url = property['property_url']
                 if property_url == 'https://www.hlbank.com.vn/loan-leadform':
                     continue
                 else: pass
@@ -748,8 +756,10 @@ class CrawlingWeb:
                     # Extract property details
                     spec_items = self.driver.find_elements(By.CLASS_NAME, "re__pr-specs-content-item")
                     property_details = {}
-                    property_details["URL"] = property_url
-                    property_details['datetime'] = current_datetime
+                    property_details["Property URL"] = property_url
+                    property_details['Datetime'] = current_datetime
+                    property_details['Source URL'] = property['source']
+                    
                     for item in spec_items:
                         try:
                             title = item.find_element(By.CLASS_NAME, "re__pr-specs-content-item-title").text
@@ -784,7 +794,7 @@ class CrawlingWeb:
                 except Exception as e:
                     print(f"An error occurred while collecting details from {property_url}: {e}")
                 
-            return property_data
+            # return property_data
 
         def __del__(self):
             if self.driver:
