@@ -740,7 +740,7 @@ class CrawlingWeb:
 
             # property_data = []
             gmt_plus_7 = timezone(timedelta(hours=7))
-            current_datetime = datetime.now(gmt_plus_7).strftime('%Y-%m-%d %H:%M:%S')
+            current_datetime = datetime.now(gmt_plus_7).strftime('%Y-%m-%d')
             for property in all_property_urls:
                 property_url = property['property_url']
                 if property_url == 'https://www.hlbank.com.vn/loan-leadform':
@@ -757,7 +757,7 @@ class CrawlingWeb:
                     spec_items = self.driver.find_elements(By.CLASS_NAME, "re__pr-specs-content-item")
                     property_details = {}
                     property_details["Property URL"] = property_url
-                    property_details['Datetime'] = current_datetime
+                    property_details['Datetime Collected At'] = current_datetime
                     property_details['Source URL'] = property['source']
                     
                     for item in spec_items:
