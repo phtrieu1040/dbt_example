@@ -704,7 +704,7 @@ class CrawlingWeb:
             # Initialize and return the Selenium WebDriver
             if self.driver is None:
                 self.driver = webdriver.Chrome(
-                    service=Service(ChromeDriverManager().install()),
+                    service=Service(ChromeDriverManager(driver_version='131.0.6778.265').install()),
                     options=self.options
                 )
             return self.driver
