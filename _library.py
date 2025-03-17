@@ -460,6 +460,57 @@ class GoogleFile:
     #     data = pd.DataFrame(values[header_row:], columns=values[header_row-1])
     #     return data
     
+    def upload_file_to_drive(self, local_file_path, remote_file_name=None, file_id=None, file_url=None, mime_type=None):
+        self.check_cred()
+
+        if file_url and not file_id:
+            try:
+                file_id = MyFunction.extract_google_drive_id(file_url)
+            except Exception as e:
+                print('Could not extract file Id from URL: ', {file_url}, ". Error: ", e)
+        
+        if remote_file_name is None:
+            remote_file_name = os.path.basename(local_file_path)
+
+        if file_id is None and remote_file_name is not None:
+            query = f'name = "{remote_file_name}" and trashed = false'
+            results = self.credentials.drive_service.files().list(
+                q=query,
+                spaces='drive',
+                fields='files(id, name)'
+            ).execute()
+            items = results.get('files', [])
+
+            if items:
+                file_id = items[0]['id']
+                print(f'Found file "{remote_file_name}", will update trucate it with ID: "{file_id}"')
+
+        try:
+            if file_id:
+                media = MediaFileUpload(local_file_path, mimetype=mime_type, resumable=True)
+                updated_file = self.credentials.drive_service.files().update(
+                    fileId=file_id,
+                    media_body=media
+                ).execute()
+                print(f'File updated successfully. File ID: "{updated_file['id']}"')
+                return updated_file['id']
+            
+            else:
+                file_metadata = {
+                    'name': remote_file_name
+                }
+                media = MediaFileUpload(local_file_path, mimetype=mime_type, resumable=True)
+                created_file = self.credentials.drive_service.files().create(
+                    body=file_metadata,
+                    media_body=media,
+                    fields='id'
+                ).execute()
+                print(f'File uploaded successfully. File ID: "{created_file['id']}"')
+                return created_file['id']
+        except Exception as e:
+            print(f'Error uploading file to Google Drive: "{e}"')
+            return None
+
     def read_google_sheet_by_url(self, url, worksheet_name='', header_row=1, range_name=''):
         sh = self._get_sheet(url)
         if worksheet_name:
@@ -478,7 +529,13 @@ class GoogleFile:
 
         return data
     
-    def write_google_sheet_by_url(self, url, worksheet_name, df_to_write, start_cell='A1', delete_before_write=True, copy_head=True):
+    def write_google_sheet_by_url(
+            self, df_to_write,
+            url = 'https://docs.google.com/spreadsheets/d/1DuI6q1QuqhA9qmR5fULaQC8j_68E30Us13hDPBotXuc/edit?gid=1458495087#gid=1458495087',
+            worksheet_name = 'python_destination',
+            start_cell='A1',
+            delete_before_write=True,
+            copy_head=True):
         sh = self._get_sheet(url)
         wks = sh.worksheet(worksheet_name)
         if delete_before_write:
@@ -539,7 +596,7 @@ class GoogleFile:
         service_sheet = self.credentials.service.spreadsheets()
         return service_sheet
     
-    def _modify_permision_by_drive_service(self, email, sheet_id, role:Literal['reader', 'writer', 'owner'], type: Literal['anyone', 'user']):
+    def _modify_permision_by_drive_service(self, email, sheet_id, role:Literal['reader', 'writer', 'owner'], type: Literal['anyone', 'user'], transfer_ownership=False):
         self.check_cred()
         new_permissions = {
             'role': role,
@@ -549,7 +606,7 @@ class GoogleFile:
         try:
             self.credentials.drive_service.permissions().create(fileId=sheet_id,
                                                                body=new_permissions,
-                                                               transferOwnership=True).execute()
+                                                               transferOwnership=transfer_ownership).execute()
         except Exception as e:
             print(e)
 
@@ -1471,25 +1528,47 @@ class MyFunction:
     def extract_google_drive_id(url):
         # Define the patterns for Google Drive documents
         google_drive_patterns = [
+            # Common document formats
             "/spreadsheets/d/",
             "/document/d/",
             "/presentation/d/",
-            "/file/d/"
+            "/file/d/",
+            "/forms/d/",
+            "/drawings/d/",
+            
+            # Folders and drives
+            "/drive/folders/",
+            "/drive/u/[0-9]+/folders/",
+            "/drive/shared-drives/",
+            "/drive/u/[0-9]+/shared-drives/",
         ]
 
+        # Try to match standard patterns
         for pattern in google_drive_patterns:
-            start_index = url.find(pattern)
-            if start_index != -1:
-                start_index += len(pattern)  # Move index to start of the ID
-                end_index = url.find("/", start_index)  # Find the end of the ID
-                if end_index == -1:  # If no "/" found, assume rest of URL is the ID
-                    end_index = url.find("?", start_index)  # Alternative end, looking for query params
-                    if end_index == -1:  # No query params found either
-                        return url[start_index:]  # Return the rest of the URL as the ID
+            # Use regex to handle patterns with wildcards like u/[0-9]+
+            if '[0-9]+' in pattern:
+                pattern_regex = pattern.replace('[0-9]+', '[0-9]+')
+                match = re.search(f"{pattern_regex}([^/?]+)", url)
+                if match:
+                    return match.group(1)
+            else:
+                start_index = url.find(pattern)
+                if start_index != -1:
+                    start_index += len(pattern)  # Move index to start of the ID
+                    end_index = url.find("/", start_index)  # Find the next "/"
+                    if end_index == -1:  # If no "/" found
+                        end_index = url.find("?", start_index)  # Try finding a "?"
+                        if end_index == -1:  # If no "?" found either
+                            return url[start_index:]  # Take the rest as ID
+                        else:
+                            return url[start_index:end_index]  # Take until "?"
                     else:
-                        return url[start_index:end_index]  # Return up to the start of query params
-                else:  # If "/" found, return the ID portion up to that "/"
-                    return url[start_index:end_index]
+                        return url[start_index:end_index]  # Take until "/"
+        
+        # Handle Google Apps Script URLs
+        script_match = re.search(r'script\.google\.com/[a-z/]+/([^/?]+)', url)
+        if script_match:
+            return script_match.group(1)
 
         return None
     
