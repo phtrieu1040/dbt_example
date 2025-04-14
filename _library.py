@@ -4,6 +4,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import credentials
 from google.cloud import bigquery
 from google.cloud import storage
+from google.cloud import bigquery_datatransfer
 import pandas as pd
 import os
 from googleapiclient.discovery import build
@@ -37,12 +38,21 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, NoSuchElementException
+import atexit
+import threading
+import signal
+import logging
+from selenium.webdriver.chrome.options import Options
+import getpass
+import json
 
-
-SCOPES=["https://www.googleapis.com/auth/bigquery",
-        "https://www.googleapis.com/auth/drive",
-        "https://www.googleapis.com/auth/spreadsheets",
-        ]
+SCOPES=[
+    # "https://www.googleapis.com/auth/bigquery",
+    # "https://www.googleapis.com/auth/drive",
+    # "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/cloud-platform"
+    ]
 
 client_token='token.pickle'
 pydrive_token='pydrive_token.pickle'
@@ -177,6 +187,8 @@ class Authorization:
         self._gauth = None
         self._drive = None
         self._gspread_client = None
+        self._cloud_manager = None
+        self._gcs_client = None
         
         if use_service_account:
             self._initialize_service_account(client_secret_directory)
@@ -233,6 +245,8 @@ class Authorization:
         self._service = build('sheets', 'v4', credentials=credentials)
         self._drive_service = build('drive', 'v3', credentials=credentials)
         self._gspread_client = gspread.authorize(credentials)
+        self._cloud_manager = build('cloudresourcemanager', 'v1', credentials=credentials)
+        self._gcs_client = storage.Client.from_service_account_json(client_secret_file_path)
 
     @property
     def client(self):
@@ -257,6 +271,14 @@ class Authorization:
     @property
     def gspread_client(self):
         return self._gspread_client
+    
+    @property
+    def cloud_manager(self):
+        return self._cloud_manager
+    
+    @property
+    def gcs_client(self):
+        return self._gcs_client
 
     
 class GoogleFile:
@@ -747,30 +769,81 @@ class GoogleFile:
         os.remove(output)
         return df
 
-class GoogleCloudStorage:
-    def __init__(self, client_secret_directory, use_service_account=True):
+
+class GoogleCloudPlatform:
+    def __init__(self, client_secret_directory, use_service_account = True):
         self.use_service_account = use_service_account
-        self.client_secret_file_path = os.path.join(client_secret_directory, client_secret_file)
-        self._storage_client = None
-        self._initialize_client()
-    
-    def _initialize_client(self):
-        if self.use_service_account:
-            self._storage_client = storage.Client.from_service_account_json(self.client_secret_file_path)
-        else:
-            self._storage_client = storage.Client()
-    
+        self._credentials = Authorization(client_secret_directory)
+        self.client_secret_directory = client_secret_directory
+
     @property
-    def client(self):
-        if not self._storage_client:
-            self._initialize_client()
-        return self._storage_client
+    def credentials(self):
+        return self._credentials
+    
+    @credentials.setter
+    def credentials(self, new_credentials):
+        self._credentials = new_credentials
+
+    def check_cred(self):
+        if self.use_service_account:
+            # For service account, no token expiration checks are required
+            return
+        else:
+            creds = Tokenization.load_cred(client_token, self.client_secret_directory) 
+            gauth = Tokenization.load_cred(pydrive_token, self.client_secret_directory)
+            if self.credentials.client._credentials.expired or self.credentials.gauth.access_token_expired or creds is None or gauth is None:
+                self.credentials = Authorization(self.client_secret_directory)
+
+    def get_cloud_manager(self):
+        self.check_cred()
+        cloud_manager = self.credentials.cloud_manager
+        return cloud_manager
+    
+    def get_iam_policy(self, project_id):
+        self.check_cred()
+        cloud_manager = self.get_cloud_manager()
+        policy = cloud_manager.projects().getIamPolicy(
+            resource=project_id,
+            body={}
+        ).execute()
+        return policy
+
+
+class GoogleCloudStorage:
+    def __init__(self, client_secret_directory, use_service_account = True):
+        self.use_service_account = use_service_account
+        self._credentials = Authorization(client_secret_directory)
+        self.client_secret_directory = client_secret_directory
+
+    @property
+    def credentials(self):
+        return self._credentials
+    
+    @credentials.setter
+    def credentials(self, new_credentials):
+        self._credentials = new_credentials
+
+    def check_cred(self):
+        if self.use_service_account:
+            # For service account, no token expiration checks are required
+            return
+        else:
+            creds = Tokenization.load_cred(client_token, self.client_secret_directory) 
+            gauth = Tokenization.load_cred(pydrive_token, self.client_secret_directory)
+            if self.credentials.client._credentials.expired or self.credentials.gauth.access_token_expired or creds is None or gauth is None:
+                self.credentials = Authorization(self.client_secret_directory)
+
+    def get_gcs_client(self):
+        self.check_cred()
+        gcs_client = self.credentials.gcs_client
+        return gcs_client
     
 
     def upload_file_to_gcs(self, source_file_path, bucket_folder_path):
         parts = bucket_folder_path.strip('/').split('/', 1)
         bucket_name = parts[0]
-        
+        gcs_client = self.get_gcs_client()
+
         filename = os.path.basename(source_file_path)
         
         if len(parts) > 1:
@@ -781,7 +854,7 @@ class GoogleCloudStorage:
         else:
             destination_blob_name = filename
         
-        bucket = self.client.bucket(bucket_name)
+        bucket = gcs_client.bucket(bucket_name)
         
         blob = bucket.blob(destination_blob_name)
         blob.upload_from_filename(source_file_path)
@@ -791,7 +864,8 @@ class GoogleCloudStorage:
     
 
     def download_file(self, bucket_name, source_blob_name:Literal['file path in GCS'], destination_file_path:Literal['file path in local']=None):
-        bucket = self.client.bucket(bucket_name)
+        gcs_client = self.get_gcs_client()
+        bucket = gcs_client.bucket(bucket_name)
         blob = bucket.blob(source_blob_name)
         
         # If no destination path is provided, use current working directory + original filename
@@ -825,6 +899,8 @@ class GoogleCloudStorage:
         """
         import io
         
+        gcs_client = self.get_gcs_client()
+
         # Parse bucket and folder path
         parts = bucket_folder_path.strip('/').split('/', 1)
         bucket_name = parts[0]
@@ -844,7 +920,7 @@ class GoogleCloudStorage:
             destination_blob_name = filename
         
         # Get bucket
-        bucket = self.client.bucket(bucket_name)
+        bucket = gcs_client.bucket(bucket_name)
         
         # Create blob
         blob = bucket.blob(destination_blob_name)
@@ -884,7 +960,8 @@ class GoogleCloudStorage:
     
     def list_files(self, bucket_name, prefix=None):
         """List all files in a bucket with optional prefix filter"""
-        bucket = self.client.bucket(bucket_name)
+        gcs_client = self.get_gcs_client()
+        bucket = gcs_client.bucket(bucket_name)
         blobs = bucket.list_blobs(prefix=prefix)
         return [blob.name for blob in blobs]
 
@@ -1198,6 +1275,12 @@ class Bigquery:
         self.check_cred()
         client = self.credentials.client
         return client
+    
+    def list_all_scheduled_queries(self, location):
+        client = self._get_bqr_client()
+        cred = client._credentials
+        project_id = client.project
+        return cred, project_id
 
     def drop_bigquery_table(self,table_id):
         client = self._get_bqr_client()
@@ -1435,13 +1518,13 @@ class Bigquery:
         job_config = bigquery.LoadJobConfig(
             source_format=bigquery.SourceFormat.CSV, skip_leading_rows=1, autodetect=True,
         )
-
+        client = self.credentials.client
         with open(file_path, "rb") as source_file:
-            job = self.client.load_table_from_file(source_file, table_id, job_config=job_config)
+            job = client.load_table_from_file(source_file, table_id, job_config=job_config)
 
         job.result()  # Waits for the job to complete.
 
-        table = self.client.get_table(table_id)  # Make an API request.
+        table = client.get_table(table_id)  # Make an API request.
         print(
             "Loaded {} rows and {} columns to {}".format(
                 table.num_rows, len(table.schema), table_id
@@ -1462,6 +1545,10 @@ class MyLibrary:
         self._bigquery = Bigquery(client_secret_directory)
         self._google = GoogleFile(client_secret_directory)
         self._storage = GoogleCloudStorage(client_secret_directory)
+        self._selenium = BackgroundSelenium()
+        self._selenium_v2 = BackgroundSelenium_v2()
+        self._improved_selenium = ImprovedBackgroundSelenium()
+        self._google_platform = GoogleCloudPlatform(client_secret_directory)
     
     @property
     def bigquery(self):
@@ -1475,6 +1562,22 @@ class MyLibrary:
     def storage(self):
         return self._storage
     
+    @property
+    def selenium(self):
+        return self._selenium
+    
+    @property
+    def selenium_v2(self):
+        return self._selenium_v2
+    
+    @property
+    def improved_selenium(self):
+        return self._improved_selenium
+    
+    @property
+    def google_platform(self):
+        return self._google_platform
+
     @property
     def function(self):
         return MyFunction()
@@ -2219,3 +2322,3356 @@ class MyProject:
             self.mail._log_out_email()
 
     ##a test here
+
+class ImprovedBackgroundSelenium:
+    def __init__(self, session_duration_minutes=60, log_file='selenium_background.log', cookies_path='cookies.pkl'):
+        # Setup logging with more detailed information
+        self.setup_enhanced_logging(log_file)
+        
+        # Session management
+        self.session_duration = timedelta(minutes=session_duration_minutes)
+        self.session_start_time = None
+        self.session_end_time = None
+        self.is_running = False
+        self.thread = None
+        self.driver = None
+        self.stop_event = threading.Event()
+        self.task_queue = []
+        self.queue_lock = threading.Lock()
+        self.queue_thread = None
+        self.queue_running = False
+
+        # Cookies configuration
+        self.cookies_path = cookies_path
+        self.cookies_loaded = False
+        
+        # Register cleanup handlers
+        atexit.register(self.cleanup)
+        signal.signal(signal.SIGINT, self.signal_handler)
+        
+        # Store session info
+        self.session_info_file = 'selenium_session.json'
+        
+        # Lock for thread-safe operations
+        self._driver_lock = threading.Lock()
+        
+        # Flag for forced termination
+        self._force_termination = False
+
+    def setup_enhanced_logging(self, log_file):
+        import logging
+        """Setup improved logging configuration"""
+        self.logger = logging.getLogger('background_selenium')
+        self.logger.setLevel(logging.INFO)
+        
+        # Clear existing handlers if any
+        if self.logger.handlers:
+            for handler in self.logger.handlers:
+                self.logger.removeHandler(handler)
+        
+        # File handler with rotation
+        import logging.handlers
+        file_handler = logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=5*1024*1024, backupCount=3
+        )
+        file_handler.setLevel(logging.INFO)
+        
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        
+        formatter = logging.Formatter('[%(asctime)s] [%(threadName)s] [%(levelname)s] - %(message)s')
+        file_handler.setFormatter(formatter)
+        console_handler.setFormatter(formatter)
+        
+        self.logger.addHandler(file_handler)
+        self.logger.addHandler(console_handler)
+
+    def initialize_driver(self):
+        """Initialize the Selenium WebDriver with improved options"""
+        self.logger.info("Initializing Chrome WebDriver...")
+        
+        options = Options()
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1920,1080")
+        
+        # Create a persistent Chrome profile directory
+        user_data_dir = os.path.join(os.getcwd(), "chrome_profile")
+        if not os.path.exists(user_data_dir):
+            os.makedirs(user_data_dir)
+        
+        # Add the user data directory to Chrome options
+        options.add_argument(f"--user-data-dir={user_data_dir}")
+        options.add_argument("--profile-directory=Default")
+        
+        # Additional options to improve session persistence and avoid detection
+        options.add_argument("--disable-web-security")
+        options.add_argument("--disable-site-isolation-trials")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+        
+        # Set up preferences including download directory
+        download_dir = os.path.join(os.getcwd(), "downloads")
+        if not os.path.exists(download_dir):
+            os.makedirs(download_dir)
+            
+        prefs = {
+            "credentials_enable_service": True,
+            "profile.password_manager_enabled": True,
+            "autofill.profile_enabled": True,
+            "download.default_directory": download_dir,
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "safebrowsing.enabled": False
+        }
+        options.add_experimental_option("prefs", prefs)
+        
+        # Create driver
+        try:
+            with self._driver_lock:
+                self.driver = webdriver.Chrome(
+                    service=Service(ChromeDriverManager().install()),
+                    options=options
+                )
+                
+                # Additional anti-detection measures
+                self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+                    "source": """
+                    Object.defineProperty(navigator, 'webdriver', {
+                        get: () => undefined
+                    });
+                    Object.defineProperty(navigator, 'plugins', {
+                        get: () => [1, 2, 3, 4, 5]
+                    });
+                    """
+                })
+                
+                self.logger.info("Chrome WebDriver initialized successfully")
+                return True
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Chrome WebDriver: {e}", exc_info=True)
+            return False
+
+    def get_to_site(self, url, driver=None, stop_event=None):
+        """Enhanced navigation with improved login handling"""
+        try:
+            self.logger.info(f'Navigating to {url}...')
+            driver = driver if driver is not None else self.driver
+            
+            # Screenshot before any action
+            driver.save_screenshot("pre_navigation.png")
+            self.logger.info("Saved pre-navigation screenshot")
+            
+            # Try to load cookies first
+            cookies_loaded = self.load_cookies(path=self.cookies_path, url=url)
+            self.cookies_loaded = cookies_loaded
+            
+            # Navigate to the URL
+            driver.get(url)
+            self.logger.info(f'Initial navigation complete. Current URL: {driver.current_url}')
+            
+            # Take screenshot after navigation
+            driver.save_screenshot("post_navigation.png")
+            self.logger.info("Saved post-navigation screenshot")
+            
+            # Check if we need to log in - more comprehensive detection
+            login_indicators = [
+                "login", "signin", "sign in", "auth", "account/auth", 
+                "username", "password", "email", "log in"
+            ]
+            
+            # Check URL and page source
+            url_needs_login = any(indicator in driver.current_url.lower() for indicator in login_indicators)
+            content_needs_login = any(indicator in driver.page_source.lower() for indicator in login_indicators)
+            
+            # Also check for login form elements
+            login_elements = False
+            try:
+                # Look for common login form elements
+                login_form_elements = driver.find_elements(By.XPATH, 
+                    "//input[@type='password'] | //input[@name='password'] | "
+                    "//form[contains(., 'login') or contains(., 'sign in')] | "
+                    "//button[contains(., 'Login') or contains(., 'Sign in')]"
+                )
+                login_elements = len(login_form_elements) > 0
+                
+                if login_elements:
+                    self.logger.info(f"Found {len(login_form_elements)} login-related elements")
+            except Exception as e:
+                self.logger.warning(f"Error checking for login elements: {e}")
+            
+            needs_login = url_needs_login or content_needs_login or login_elements
+                
+            if needs_login:
+                self.logger.info("Login page detected, initiating login flow")
+                
+                # Take screenshot of login page
+                driver.save_screenshot("login_page.png")
+                self.logger.info("Saved login page screenshot")
+                
+                # Try automated login if credentials are configured
+                login_successful = False
+                if hasattr(self, 'username') and hasattr(self, 'password') and self.username and self.password:
+                    self.logger.info("Attempting automated login with configured credentials")
+                    login_successful = self.attempt_login(driver)
+                
+                if not login_successful:
+                    # Wait for manual login
+                    self.logger.info("=== MANUAL LOGIN REQUIRED ===")
+                    print("\n" + "="*70)
+                    print("LOGIN REQUIRED: Please log in manually in the browser window.")
+                    print("The automation will continue once you've completed login.")
+                    print("="*70 + "\n")
+                    
+                    # Wait for login to complete with progress updates
+                    max_wait = 300  # 5 minutes max wait time
+                    wait_interval = 5  # Check every 5 seconds
+                    total_waited = 0
+                    
+                    while needs_login and total_waited < max_wait:
+                        if stop_event and stop_event.is_set():
+                            self.logger.info("Stop event detected during login wait")
+                            return
+                            
+                        try:
+                            time.sleep(wait_interval)
+                            total_waited += wait_interval
+                            
+                            # Check URL again
+                            current_url = driver.current_url
+                            url_still_login = any(indicator in current_url.lower() for indicator in login_indicators)
+                            
+                            # Check page source again
+                            try:
+                                content_still_login = any(indicator in driver.page_source.lower() for indicator in login_indicators[:4])  # Using only the first few indicators for speed
+                            except:
+                                content_still_login = False
+                                
+                            # Try to find elements that indicate successful login
+                            success_indicators = [
+                                "//button[contains(., 'Log out') or contains(., 'Sign out')]",
+                                "//a[contains(., 'Log out') or contains(., 'Sign out')]",
+                                "//div[contains(@class, 'user-info')]",
+                                "//span[contains(@class, 'username')]"
+                            ]
+                            
+                            success_elements = False
+                            for indicator in success_indicators:
+                                try:
+                                    elements = driver.find_elements(By.XPATH, indicator)
+                                    if elements:
+                                        success_elements = True
+                                        break
+                                except:
+                                    pass
+                            
+                            # Check if we're no longer at login page
+                            if (not url_still_login) or success_elements or (not content_still_login):
+                                self.logger.info("Login seems complete based on page changes")
+                                needs_login = False
+                                break
+                                
+                            print(f"Waiting for login... ({total_waited} seconds elapsed)")
+                                
+                        except Exception as e:
+                            self.logger.warning(f"Error while waiting for login: {e}")
+                    
+                    if needs_login:
+                        self.logger.warning("Login timeout reached or failed detection. Proceeding anyway.")
+                        # Take screenshot of the state
+                        driver.save_screenshot("login_timeout.png")
+                    else:
+                        self.logger.info("Login completed successfully")
+                        driver.save_screenshot("login_success.png")
+                        # Save the cookies for future use
+                        self.save_cookies(path=self.cookies_path)
+                        
+                        # Reload the target URL for fresh start
+                        driver.get(url)
+                        self.logger.info(f"Reloaded page after login. Current URL: {driver.current_url}")
+            
+            # Wait for the page to load after navigation
+            try:
+                # Wait for common page elements with improved timeout handling
+                wait = WebDriverWait(driver, 30)
+                
+                # Try different common elements
+                for selector in [
+                    (By.TAG_NAME, "body"),  # Basic element
+                    (By.TAG_NAME, "header"),  # Common header
+                    (By.TAG_NAME, "main"),   # Main content
+                    (By.CSS_SELECTOR, ".app-content"),  # Common app content
+                    (By.CSS_SELECTOR, "#content"),  # Common content div
+                ]:
+                    try:
+                        wait.until(EC.presence_of_element_located(selector))
+                        self.logger.info(f"Found element {selector}")
+                        break
+                    except:
+                        continue
+                        
+                self.logger.info("Page loaded successfully")
+                
+            except Exception as e:
+                self.logger.warning(f"Timeout or error waiting for page elements: {e}")
+                
+            # Take final screenshot
+            try:
+                screenshot_path = os.path.join(os.getcwd(), "navigation_complete.png")
+                driver.save_screenshot(screenshot_path)
+                self.logger.info(f"Final screenshot saved to {screenshot_path}")
+            except Exception as e:
+                self.logger.warning(f"Failed to take screenshot: {e}")
+                
+            # Print final status
+            self.logger.info(f'Navigation complete. Final URL: {driver.current_url}')
+            
+        except Exception as e:
+            self.logger.error(f'Error navigating to URL {url}: {e}', exc_info=True)
+            try:
+                driver.save_screenshot("navigation_error.png")
+                self.logger.info("Saved error screenshot")
+            except:
+                pass
+
+    def attempt_login(self, driver):
+        """Attempt automated login if credentials are available"""
+        try:
+            # Look for username/email field
+            username_selectors = [
+                "//input[@name='username']",
+                "//input[@name='email']",
+                "//input[@id='username']",
+                "//input[@id='email']",
+                "//input[@placeholder='Username' or @placeholder='Email']",
+                "//input[@type='text']"
+            ]
+            
+            # Look for password field
+            password_selectors = [
+                "//input[@name='password']",
+                "//input[@id='password']",
+                "//input[@placeholder='Password']",
+                "//input[@type='password']"
+            ]
+            
+            # Find username field
+            username_field = None
+            for selector in username_selectors:
+                try:
+                    elements = driver.find_elements(By.XPATH, selector)
+                    if elements:
+                        username_field = elements[0]
+                        break
+                except:
+                    continue
+                    
+            # Find password field
+            password_field = None
+            for selector in password_selectors:
+                try:
+                    elements = driver.find_elements(By.XPATH, selector)
+                    if elements:
+                        password_field = elements[0]
+                        break
+                except:
+                    continue
+            
+            if not username_field or not password_field:
+                self.logger.warning("Could not locate username or password fields")
+                return False
+                
+            # Fill in credentials
+            self.logger.info("Found login fields, filling credentials")
+            username_field.clear()
+            username_field.send_keys(self.username)
+            
+            password_field.clear()
+            password_field.send_keys(self.password)
+            
+            # Find login button
+            login_button_selectors = [
+                "//button[contains(., 'Login') or contains(., 'Sign in') or contains(., 'Log in')]",
+                "//button[@type='submit']",
+                "//input[@type='submit']",
+                "//button[contains(@class, 'login') or contains(@class, 'signin')]",
+                "//button"  # Last resort: any button
+            ]
+            
+            login_button = None
+            for selector in login_button_selectors:
+                try:
+                    elements = driver.find_elements(By.XPATH, selector)
+                    if elements:
+                        login_button = elements[0]
+                        break
+                except:
+                    continue
+            
+            if not login_button:
+                self.logger.warning("Could not locate login button")
+                
+                # Try to submit the form directly
+                try:
+                    self.logger.info("Attempting to submit form directly")
+                    form = driver.find_element(By.XPATH, "//form")
+                    form.submit()
+                    time.sleep(2)
+                except:
+                    self.logger.warning("Form submission failed, login incomplete")
+                    return False
+            else:
+                # Click the login button
+                self.logger.info(f"Clicking login button: {login_button.text}")
+                try:
+                    login_button.click()
+                except:
+                    # Try JavaScript click as fallback
+                    try:
+                        driver.execute_script("arguments[0].click();", login_button)
+                        self.logger.info("Used JavaScript to click login button")
+                    except:
+                        self.logger.warning("Button click failed, login incomplete")
+                        return False
+            
+            # Wait briefly to see if login worked
+            time.sleep(5)
+            
+            # Check for login errors or success
+            if "incorrect" in driver.page_source.lower() or "invalid" in driver.page_source.lower():
+                self.logger.warning("Login failed - error message detected on page")
+                return False
+                
+            # Look for success indicators
+            success_indicators = [
+                "//button[contains(., 'Log out') or contains(., 'Sign out')]",
+                "//a[contains(., 'Log out') or contains(., 'Sign out')]",
+                "//div[contains(@class, 'user-info')]",
+                "//span[contains(@class, 'username')]"
+            ]
+            
+            for indicator in success_indicators:
+                try:
+                    elements = driver.find_elements(By.XPATH, indicator)
+                    if elements:
+                        self.logger.info("Login successful - found success indicator")
+                        return True
+                except:
+                    pass
+            
+            # Check if URL changed away from login page
+            login_indicators = ["login", "signin", "auth"]
+            if not any(indicator in driver.current_url.lower() for indicator in login_indicators):
+                self.logger.info("Login seems successful based on URL change")
+                return True
+                
+            # If we're not sure, log the status but return True to continue
+            self.logger.info("Login status uncertain, but proceeding")
+            return True
+            
+        except Exception as e:
+            self.logger.error(f"Error during login attempt: {e}", exc_info=True)
+            return False
+
+    def save_cookies(self, path=None):
+        """Save current browser cookies to a file"""
+        if path is None:
+            path = self.cookies_path
+            
+        try:
+            if self.driver:
+                with self._driver_lock:
+                    cookies = self.driver.get_cookies()
+                with open(path, 'wb') as file:
+                    pickle.dump(cookies, file)
+                self.logger.info(f"Cookies saved to {path}")
+                return True
+            else:
+                self.logger.error("No driver available to save cookies")
+                return False
+        except Exception as e:
+            self.logger.error(f"Error saving cookies: {e}", exc_info=True)
+            return False
+
+    def load_cookies(self, path=None, url=None):
+        """Load cookies from file into current browser session"""
+        if path is None:
+            path = self.cookies_path
+            
+        try:
+            if not self.driver:
+                self.logger.error("No driver available to load cookies")
+                return False
+                
+            # Navigate to the domain first if provided
+            if url:
+                try:
+                    base_url = url.split('//', 1)[1].split('/', 1)[0]  # Extract domain
+                    with self._driver_lock:
+                        self.driver.get(f"https://{base_url}")
+                    self.logger.info(f"Navigated to base domain: {base_url}")
+                except:
+                    self.logger.warning(f"Could not extract domain from URL: {url}")
+            
+            if not os.path.exists(path):
+                self.logger.warning(f"Cookie file {path} not found")
+                return False
+                
+            with open(path, 'rb') as file:
+                cookies = pickle.load(file)
+                
+            # Add each cookie with error handling for individual cookies
+            cookie_success = 0
+            cookie_fail = 0
+            with self._driver_lock:
+                for cookie in cookies:
+                    try:
+                        # Ensure cookie is compatible (remove problematic attributes)
+                        if 'expiry' in cookie:
+                            cookie['expiry'] = int(cookie['expiry'])
+                        
+                        self.driver.add_cookie(cookie)
+                        cookie_success += 1
+                    except Exception as e:
+                        self.logger.debug(f"Error adding cookie: {e}")
+                        cookie_fail += 1
+            
+            self.logger.info(f"Cookies loaded: {cookie_success} successful, {cookie_fail} failed")
+            
+            # Refresh to apply cookies
+            with self._driver_lock:
+                self.driver.refresh()
+            self.cookies_loaded = True
+            return True
+        except Exception as e:
+            self.logger.error(f"Error loading cookies: {e}", exc_info=True)
+            self.cookies_loaded = False
+            return False
+
+    def start_queue_processor(self):
+        """Start a background thread that processes tasks from the queue with enhanced session management"""
+        if self.queue_thread and self.queue_thread.is_alive():
+            self.logger.warning("Task queue is already running")
+            return False
+            
+        if not self.initialize_driver():
+            self.logger.error("Failed to initialize driver for task queue")
+            return False
+            
+        # Set up session timing
+        self.session_start_time = datetime.now()
+        self.session_end_time = self.session_start_time + self.session_duration
+        
+        # Reset termination flag
+        self._force_termination = False
+        
+        # Save session info
+        self.save_session_info()
+        
+        self.queue_running = True
+        self.is_running = True
+        self.stop_event.clear()  # Ensure the stop event is cleared
+        
+        self.queue_thread = threading.Thread(
+            target=self._process_queue_with_expiration,
+            name="QueueProcessor",
+            daemon=True
+        )
+        self.queue_thread.start()
+        self.logger.info(f"Task queue processor started. Session will expire at {self.session_end_time}")
+        return True
+        
+    def _process_queue_with_expiration(self):
+        """Process tasks from the queue with improved termination handling"""
+        try:
+            self.logger.info("Queue processor thread started")
+            
+            while self.queue_running and not self.stop_event.is_set() and not self._force_termination:
+                # Check for session expiration
+                if datetime.now() >= self.session_end_time:
+                    self.logger.info("Session has expired.")
+                    break
+                    
+                task = None
+                with self.queue_lock:
+                    if self.task_queue:
+                        task = self.task_queue.pop(0)
+                        
+                if task:
+                    func, args, kwargs = task
+                    try:
+                        # Add standard parameters if not already provided
+                        if 'driver' not in kwargs or kwargs['driver'] is None:
+                            kwargs['driver'] = self.driver
+                        if 'stop_event' not in kwargs or kwargs['stop_event'] is None:
+                            kwargs['stop_event'] = self.stop_event
+                            
+                        self.logger.info(f"Executing task: {func.__name__}")
+                        function_start = time.time()
+                        func(*args, **kwargs)
+                        function_duration = time.time() - function_start
+                        self.logger.info(f"Task {func.__name__} completed in {function_duration:.2f} seconds")
+                    except Exception as e:
+                        self.logger.error(f"Error executing task {func.__name__}: {e}", exc_info=True)
+                        # Take a screenshot for troubleshooting
+                        with self._driver_lock:
+                            if self.driver:
+                                screenshot_path = os.path.join(os.getcwd(), f"task_error_{func.__name__}.png")
+                                try:
+                                    self.driver.save_screenshot(screenshot_path)
+                                    self.logger.info(f"Error screenshot saved to {screenshot_path}")
+                                except:
+                                    pass
+                else:
+                    # No tasks, sleep briefly
+                    time.sleep(0.1)
+        except Exception as e:
+            self.logger.error(f"Fatal error in queue processor: {e}", exc_info=True)
+        finally:
+            # Clean up resources
+            self.logger.info("Queue processor stopping, cleaning up resources")
+            try:
+                self.cleanup_driver()
+            except Exception as e:
+                self.logger.error(f"Error cleaning up driver: {e}")
+                
+            self.is_running = False
+            self.queue_running = False
+            
+            # Clean up session info
+            try:
+                if os.path.exists(self.session_info_file):
+                    os.remove(self.session_info_file)
+                    self.logger.info("Session info removed")
+            except Exception as e:
+                self.logger.error(f"Failed to remove session info: {e}")
+                
+            self.logger.info("Queue processor thread terminated")
+
+    def stop_queue(self):
+        """Stop the task queue processor with enhanced termination"""
+        if not self.queue_running:
+            self.logger.warning("Task queue is not running")
+            return False
+            
+        self.logger.info("Stopping task queue processor...")
+        
+        # Set both flags to ensure termination
+        self.queue_running = False
+        self.stop_event.set()
+        self._force_termination = True
+        
+        # Wait for thread completion with timeout
+        if self.queue_thread and self.queue_thread.is_alive():
+            self.logger.info("Waiting for queue thread to terminate...")
+            self.queue_thread.join(timeout=10)
+            
+            if self.queue_thread.is_alive():
+                self.logger.warning("Queue thread did not terminate within timeout, forcing cleanup")
+            
+        # Clean up driver anyway
+        try:
+            self.cleanup_driver()
+        except Exception as e:
+            self.logger.error(f"Error during driver cleanup: {e}")
+            
+        self.is_running = False
+        self.logger.info("Task queue processor stopped")
+        return True
+
+    def cleanup_driver(self):
+        """Clean up the WebDriver resources with improved safety"""
+        with self._driver_lock:
+            if self.driver:
+                try:
+                    # Try graceful shutdown first
+                    self.logger.info("Closing WebDriver...")
+                    self.driver.close()
+                    time.sleep(0.5)
+                    
+                    self.logger.info("Quitting WebDriver...")
+                    self.driver.quit()
+                    self.logger.info("WebDriver resources released")
+                except Exception as e:
+                    self.logger.error(f"Error closing WebDriver normally: {e}")
+                    
+                    # Try force termination as last resort
+                    try:
+                        import psutil
+                        import os
+                        current_pid = os.getpid()
+                        current_process = psutil.Process(current_pid)
+                        children = current_process.children(recursive=True)
+                        
+                        for child in children:
+                            if "chrome" in child.name().lower():
+                                self.logger.info(f"Force terminating Chrome process: {child.pid}")
+                                child.terminate()
+                    except Exception as kill_e:
+                        self.logger.error(f"Error force-terminating Chrome: {kill_e}")
+                finally:
+                    self.driver = None
+
+    def cleanup(self):
+        """Clean up resources when the program exits"""
+        self.logger.info("Performing final cleanup...")
+        if self.is_running:
+            self.stop()
+        if self.queue_running:
+            self.stop_queue()
+        self.logger.info("Cleanup complete")
+    
+    def signal_handler(self, sig, frame):
+        """Handle termination signals"""
+        self.logger.info(f"Received signal {sig}, cleaning up...")
+        self.cleanup()
+        # Allow normal signal processing to continue
+        signal.default_int_handler(sig, frame)
+
+    def stop(self):
+        """Enhanced method to stop the Selenium process"""
+        if not self.is_running:
+            self.logger.warning("No active Selenium process to stop")
+            return False
+        
+        self.logger.info("Stopping Selenium background process...")
+        self._force_termination = True
+        self.stop_event.set()
+        
+        # Wait for the thread to complete (with timeout)
+        if self.thread and self.thread.is_alive():
+            self.logger.info("Waiting for thread to terminate...")
+            self.thread.join(timeout=10)
+            
+            if self.thread.is_alive():
+                self.logger.warning("Thread did not terminate within timeout, forcing cleanup")
+        
+        self.cleanup_driver()
+        self.is_running = False
+        self.logger.info("Selenium background process stopped")
+        
+        # Clean up session info
+        if os.path.exists(self.session_info_file):
+            try:
+                os.remove(self.session_info_file)
+                self.logger.info("Session info removed")
+            except Exception as e:
+                self.logger.error(f"Failed to remove session info: {e}")
+        
+        return True
+
+    def save_session_info(self):
+        """Save session information to a file"""
+        try:
+            import json
+            session_info = {
+                "session_start": self.session_start_time.isoformat() if self.session_start_time else None,
+                "session_end": self.session_end_time.isoformat() if self.session_end_time else None,
+                "is_running": self.is_running,
+                "queue_running": self.queue_running,
+                "tasks_count": len(self.task_queue),
+                "pid": os.getpid(),
+                "timestamp": datetime.now().isoformat()
+            }
+            
+            with open(self.session_info_file, 'w') as f:
+                json.dump(session_info, f, indent=2)
+                
+            self.logger.info("Session info saved")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error saving session info: {e}")
+            return False
+
+    # Add credentials for automated login
+    def set_credentials(self, username, password):
+        """Set username and password for automated login"""
+        self.username = username
+        self.password = password
+        self.logger.info(f"Credentials set for user: {username}")
+
+# Useful utility extensions
+def wait_for_element(driver, locator_type, locator, timeout=10, condition=EC.element_to_be_clickable):
+    """Utility function to wait for an element with proper error handling."""
+    try:
+        element = WebDriverWait(driver, timeout).until(
+            condition((locator_type, locator))
+        )
+        return element
+    except TimeoutException:
+        driver.save_screenshot("element_wait_timeout.png")
+        raise
+
+def click_element(driver, locator_type, locator, timeout=10, description=None, retry_with_js=True):
+    """Find and click an element with retry logic."""
+    element_desc = description or f"{locator_type}='{locator}'"
+    logging.info(f"Clicking element: {element_desc}")
+    
+    try:
+        # Wait for element to be clickable
+        element = wait_for_element(driver, locator_type, locator, timeout)
+        
+        # Try regular click
+        try:
+            element.click()
+            logging.info(f"Successfully clicked element: {element_desc}")
+            return True
+        except Exception as e:
+            logging.warning(f"Regular click failed for {element_desc}: {e}")
+            
+            # Try JavaScript click if enabled
+            if retry_with_js:
+                logging.info("Trying JavaScript click...")
+                try:
+                    driver.execute_script("arguments[0].scrollIntoView(true);", element)
+                    time.sleep(0.5)  # Give time to scroll
+                    driver.execute_script("arguments[0].click();", element)
+                    logging.info(f"Successfully clicked element with JavaScript: {element_desc}")
+                    return True
+                except Exception as js_e:
+                    logging.error(f"JavaScript click also failed: {js_e}")
+                    driver.save_screenshot("js_click_error.png")
+                    return False
+            return False
+    except Exception as e:
+        logging.error(f"Error finding or clicking element {element_desc}: {e}")
+        driver.save_screenshot("click_error.png")
+        return False
+
+def fill_element(driver, locator_type, locator, text, timeout=10, description=None, clear_first=True):
+    """Find and fill an input element with text with improved error handling."""
+    element_desc = description or f"{locator_type}='{locator}'"
+    logging.info(f"Filling element {element_desc} with text: {text}")
+    
+    try:
+        element = wait_for_element(driver, locator_type, locator, timeout, condition=EC.visibility_of_element_located)
+        
+        # First ensure element is in view
+        driver.execute_script("arguments[0].scrollIntoView(true);", element)
+        time.sleep(0.3)  # Brief pause after scrolling
+        
+        if clear_first:
+            # Try different clearing methods
+            try:
+                element.clear()
+            except:
+                # Alternative clearing methods
+                driver.execute_script("arguments[0].value = '';", element)
+                # Or send Ctrl+A then Delete
+                element.send_keys(u'\ue009' + 'a' + u'\ue009' + u'\ue017')
+                
+        # Try sending keys with potential retry
+        try:
+            element.send_keys(text)
+        except Exception as e:
+            logging.warning(f"Error with send_keys: {e}, trying JavaScript")
+            # Try setting value via JavaScript
+            try:
+                driver.execute_script(f"arguments[0].value = '{text}';", element)
+                # Trigger change event to ensure value is recognized
+                driver.execute_script("arguments[0].dispatchEvent(new Event('change', { bubbles: true }));", element)
+            except Exception as js_e:
+                logging.error(f"JavaScript value set also failed: {js_e}")
+                driver.save_screenshot("fill_js_error.png")
+                return False
+                
+        logging.info(f"Successfully filled element: {element_desc}")
+        return True
+    except Exception as e:
+        logging.error(f"Error filling element {element_desc}: {e}")
+        driver.save_screenshot("fill_error.png")
+        return False
+
+def select_dropdown_item(driver, dropdown_locator, dropdown_type, item_locator, item_type, 
+                         dropdown_description=None, item_description=None, wait_time=2, timeout=10):
+    """Select an item from a dropdown menu with improved robustness."""
+    dropdown_desc = dropdown_description or f"{dropdown_type}='{dropdown_locator}'"
+    item_desc = item_description or f"{item_type}='{item_locator}'"
+    
+    logging.info(f"Selecting {item_desc} from dropdown {dropdown_desc}")
+    
+    try:
+        # Click the dropdown to open it
+        dropdown_clicked = click_element(
+            driver, 
+            dropdown_type, 
+            dropdown_locator,
+            timeout=timeout,
+            description=dropdown_desc
+        )
+        
+        if not dropdown_clicked:
+            logging.error(f"Failed to open dropdown {dropdown_desc}")
+            return False
+            
+        # Wait for dropdown to expand
+        time.sleep(wait_time)
+        
+        # Take screenshot of open dropdown for debugging
+        driver.save_screenshot("dropdown_opened.png")
+        
+        # Check if the dropdown is actually opened
+        try:
+            # Look for dropdown container or menu items
+            dropdown_opened = driver.find_elements(By.XPATH, 
+                "//div[contains(@class, 'dropdown') and contains(@class, 'open')] | " +
+                "//div[contains(@class, 'select-dropdown')] | " +
+                "//div[contains(@class, 'popup')] | " +
+                "//ul[contains(@class, 'dropdown-menu')]"
+            )
+            
+            if not dropdown_opened:
+                logging.warning("Dropdown may not be fully opened, retrying click")
+                click_element(
+                    driver, 
+                    dropdown_type, 
+                    dropdown_locator,
+                    timeout=timeout,
+                    description=dropdown_desc,
+                    retry_with_js=True
+                )
+                time.sleep(wait_time)
+        except:
+            pass
+        
+        # Click the desired item
+        item_clicked = click_element(
+            driver,
+            item_type,
+            item_locator,
+            timeout=timeout,
+            description=item_desc,
+            retry_with_js=True
+        )
+        
+        if not item_clicked:
+            logging.error(f"Failed to select item {item_desc} from dropdown")
+            return False
+            
+        # Wait briefly for dropdown to close and selection to take effect
+        time.sleep(1)
+        
+        logging.info(f"Successfully selected {item_desc} from dropdown {dropdown_desc}")
+        return True
+    except Exception as e:
+        logging.error(f"Error during dropdown selection: {e}")
+        driver.save_screenshot("dropdown_error.png")
+        return False
+
+def get_element_text(driver, locator_type, locator, timeout=10, default=None):
+    """Get text from an element with error handling."""
+    try:
+        element = wait_for_element(driver, locator_type, locator, timeout, condition=EC.visibility_of_element_located)
+        text = element.text
+        if not text:
+            # Try getting text via JavaScript if regular method returns empty
+            text = driver.execute_script("return arguments[0].textContent;", element).strip()
+        return text
+    except Exception as e:
+        logging.error(f"Error getting text from element: {e}")
+        return default
+
+def is_element_present(driver, locator_type, locator, timeout=5):
+    """Check if an element is present on the page with timeout."""
+    try:
+        wait_for_element(driver, locator_type, locator, timeout, condition=EC.presence_of_element_located)
+        return True
+    except:
+        return False
+
+def wait_for_page_load(driver, timeout=30):
+    """Wait for page to fully load."""
+    try:
+        old_page = driver.find_element(By.TAG_NAME, 'html')
+        yield
+        WebDriverWait(driver, timeout).until(EC.staleness_of(old_page))
+        
+        # Wait for document ready state
+        WebDriverWait(driver, timeout).until(
+            lambda d: d.execute_script('return document.readyState') == 'complete'
+        )
+    except Exception as e:
+        logging.warning(f"Error waiting for page load: {e}")
+        
+def find_download_button(driver):
+    """Try different strategies to find and click the download button."""
+    logging.info("Searching for download button")
+    
+    # Try different selectors for the download button
+    possible_selectors = [
+        # Exact selectors based on the HTML structure
+        ("XPATH", "//a[contains(@href, '/api/v1/sqllab/export/')]"),
+        ("XPATH", "//a[contains(@class, 'ant-btn')]"),
+        ("XPATH", "//a[contains(@class, 'superset-button')]"),
+        ("XPATH", "//a[.//span[contains(text(), 'Download to CSV')]]"),
+        ("XPATH", "//a[contains(., 'Download')]"),
+        ("CSS_SELECTOR", "a[href*='/api/v1/sqllab/export/']"),
+        ("CSS_SELECTOR", "a.ant-btn"),
+        ("CSS_SELECTOR", "a.superset-button")
+    ]
+    
+    for selector_type, selector in possible_selectors:
+        try:
+            logging.info(f"Trying to find download button with: {selector}")
+            if selector_type == "XPATH":
+                buttons = driver.find_elements(By.XPATH, selector)
+            else:
+                buttons = driver.find_elements(By.CSS_SELECTOR, selector)
+                
+            if buttons:
+                for button in buttons:
+                    try:
+                        # Check if this element might be our download button
+                        button_text = button.text.strip()
+                        button_html = button.get_attribute('outerHTML')
+                        logging.info(f"Found potential button: {button_text}")
+                        logging.info(f"HTML: {button_html[:100]}...")
+                        
+                        if 'Download' in button_text or 'download' in button_text.lower():
+                            logging.info(f"Found download button with text: {button_text}")
+                            return button
+                        elif 'export' in button_html or '/api/v1/sqllab/export/' in button_html:
+                            logging.info(f"Found download button with export in HTML")
+                            return button
+                    except Exception as e:
+                        logging.warning(f"Error examining button: {e}")
+                        continue
+        except Exception as e:
+            logging.warning(f"Error with selector {selector}: {e}")
+            continue
+    
+    # If we get here, we haven't found the button with standard selectors
+    # Try to extract from page source instead
+    try:
+        page_source = driver.page_source
+        export_urls = re.findall(r'href=[\'"]?(/api/v1/sqllab/export/[^\'" >]+)', page_source)
+        
+        if export_urls:
+            export_url = export_urls[0]
+            logging.info(f"Found export URL in page source: {export_url}")
+            
+            # Try to find the element using this exact URL
+            try:
+                xpath = f"//a[contains(@href, '{export_url}')]"
+                element = driver.find_element(By.XPATH, xpath)
+                logging.info(f"Found download element using extracted URL")
+                return element
+            except NoSuchElementException:
+                logging.warning(f"Could not find element with extracted URL: {export_url}")
+                
+                # Return the URL for direct navigation instead
+                return export_url
+    except Exception as e:
+        logging.error(f"Error extracting export URL from page source: {e}")
+    
+    logging.warning("No download button found")
+    return None
+
+def download_query_results(driver, download_dir=None, timeout=30, stop_event=None):
+    """Download the query results as CSV and return the path to the downloaded file."""
+    logging.info("Attempting to download query results")
+    
+    if download_dir is None:
+        download_dir = os.path.join(os.getcwd(), "downloads")
+        # Ensure download directory exists
+        if not os.path.exists(download_dir):
+            os.makedirs(download_dir)
+    
+    logging.info(f"Download directory: {download_dir}")
+    
+    # Get the initial count of files in the download directory
+    initial_files = set(os.listdir(download_dir))
+    logging.info(f"Files in download directory before download: {len(initial_files)}")
+    
+    # Try to find and click the download button
+    download_target = find_download_button(driver)
+    
+    if download_target:
+        # Check if download_target is a WebElement or URL string
+        if hasattr(download_target, 'tag_name'):
+            # We have a WebElement, click it
+            logging.info("Clicking download button...")
+            try:
+                download_target.click()
+                logging.info("Clicked download button")
+            except Exception as e:
+                logging.error(f"Error clicking button: {e}")
+                try:
+                    # Try JavaScript click as fallback
+                    driver.execute_script("arguments[0].click();", download_target)
+                    logging.info("Used JavaScript to click download button")
+                except Exception as js_e:
+                    logging.error(f"JavaScript click also failed: {js_e}")
+                    return None
+        else:
+            # Assume it's a URL string
+            logging.info(f"Navigating directly to export URL: {download_target}")
+            current_url = driver.current_url
+            base_url = current_url.split('//', 1)[0] + '//' + current_url.split('//', 1)[1].split('/', 1)[0]
+            full_url = f"{base_url}{download_target}"
+            driver.get(full_url)
+            time.sleep(2)  # Wait for download to start
+            driver.get(current_url)  # Go back to results page
+    else:
+        logging.warning("Could not find download button.")
+        return None
+        
+    # Wait for download to complete
+    start_time = time.time()
+    while time.time() - start_time < timeout:
+        if stop_event and stop_event.is_set():
+            logging.warning("Download cancelled by stop event")
+            return None
+            
+        time.sleep(1)
+        current_files = set(os.listdir(download_dir))
+        new_files = current_files - initial_files
+        
+        # Check for new CSV files
+        csv_files = [f for f in new_files if f.endswith('.csv')]
+        if csv_files:
+            # Sort by creation time, newest first
+            csv_files.sort(key=lambda x: os.path.getctime(os.path.join(download_dir, x)), reverse=True)
+            csv_path = os.path.join(download_dir, csv_files[0])
+            
+            # Make sure the file is fully downloaded (not a partial download)
+            if not os.path.exists(csv_path + '.crdownload') and not os.path.exists(csv_path + '.part'):
+                # Verify file size is stable (not still being written)
+                size1 = os.path.getsize(csv_path)
+                time.sleep(1)  # Wait a bit to check if size changes
+                size2 = os.path.getsize(csv_path)
+                
+                if size1 == size2:  # File size is stable
+                    logging.info(f"Download completed successfully: {csv_path}")
+                    return csv_path
+    
+    logging.warning("Download timed out or failed")
+    return None
+
+def run_sql_query(driver, query_text, timeout=10, wait_results=120):
+    """Execute a SQL query with enhanced reliability."""
+    logging.info("Running SQL query")
+    
+    try:
+        # Clear and fill the SQL editor
+        try:
+            # Try using JavaScript for ACE editor
+            logging.info("Setting SQL query using JavaScript")
+            driver.execute_script(
+                f"ace.edit('ace-editor').setValue(`{query_text}`);",
+            )
+            logging.info("Successfully set SQL query text")
+        except Exception as js_error:
+            logging.warning(f"JavaScript approach failed: {js_error}, trying standard approach")
+            
+            # Fallback to standard approach
+            try:
+                editor = driver.find_element(By.ID, "ace-editor")
+                editor.clear()
+                editor.send_keys(query_text)
+                logging.info("Set SQL query text using standard approach")
+            except Exception as edit_e:
+                logging.error(f"Could not set SQL text: {edit_e}")
+                return False
+        
+        # Allow time to see the query in the editor
+        time.sleep(2)
+        
+        # Take screenshot of editor before running
+        driver.save_screenshot("sql_before_run.png")
+        
+        # Find and click the Run button with multiple selection strategies
+        run_button = None
+        
+        # Try CSS selector
+        try:
+            run_button = driver.find_element(By.CSS_SELECTOR, "button.superset-button-primary")
+            logging.info("Found run button by CSS selector")
+        except:
+            # Try XPath for "Run" button
+            try:
+                run_button = driver.find_element(By.XPATH, "//button[contains(., 'Run') or contains(@title, 'Run')]")
+                logging.info("Found run button by XPath text")
+            except:
+                # Try button with play icon
+                try:
+                    run_button = driver.find_element(By.XPATH, "//button[.//span[contains(@class, 'icon-play')]]")
+                    logging.info("Found run button by play icon")
+                except:
+                    logging.error("Could not find Run button")
+                    return False
+        
+        # Click the run button
+        try:
+            run_button.click()
+            logging.info("Clicked Run button")
+        except Exception as click_e:
+            logging.warning(f"Error clicking run button: {click_e}")
+            try:
+                # Try JavaScript click
+                driver.execute_script("arguments[0].click();", run_button)
+                logging.info("Clicked Run button using JavaScript")
+            except Exception as js_e:
+                logging.error(f"JavaScript click also failed: {js_e}")
+                return False
+        
+        # Wait for results to load
+        logging.info("Waiting for query results...")
+        try:
+            # Try multiple selectors for results
+            result_selectors = [
+                (By.CSS_SELECTOR, ".filterable-table-container"),
+                (By.XPATH, "//div[contains(@class, 'ResultSet')]"),
+                (By.XPATH, "//div[contains(@class, 'result-set')]"),
+                (By.XPATH, "//table[contains(@class, 'result')]")
+            ]
+            
+            results_found = False
+            for selector_type, selector in result_selectors:
+                try:
+                    WebDriverWait(driver, wait_results).until(
+                        EC.visibility_of_element_located((selector_type, selector))
+                    )
+                    logging.info(f"Query results found with selector: {selector}")
+                    results_found = True
+                    break
+                except:
+                    continue
+            
+            # Also check for "No result" message which is also a valid completion
+            if not results_found:
+                no_results_elements = driver.find_elements(By.XPATH, "//div[contains(., 'No results') or contains(., 'No data')]")
+                if no_results_elements:
+                    logging.info("Query completed with no results")
+                    results_found = True
+            
+            if not results_found:
+                logging.warning("Could not detect query results")
+                return False
+                
+            # Take a screenshot of the results
+            driver.save_screenshot("query_results.png")
+            logging.info("Query executed successfully")
+            return True
+            
+        except Exception as e:
+            logging.error(f"Error waiting for query results: {e}")
+            driver.save_screenshot("query_error.png")
+            return False
+            
+    except Exception as e:
+        logging.error(f"Error running SQL query: {e}")
+        driver.save_screenshot("sql_run_error.png")
+        return False
+
+# Function to set credentials for the selenium instance
+def set_login_credentials(sel_instance, username=None, password=None):
+    """Set login credentials for a Selenium instance."""
+    # If credentials not provided, prompt for them
+    if not username:
+        username = input("Enter your username: ")
+    
+    if not password:
+        import getpass
+        password = getpass.getpass("Enter your password: ")
+    
+    # Set credentials on the selenium instance
+    if hasattr(sel_instance, 'set_credentials'):
+        sel_instance.set_credentials(username, password)
+        logging.info(f"Credentials set for user: {username}")
+        return True
+    else:
+        logging.error("The provided selenium instance doesn't support credential setting")
+        return False
+    
+
+
+
+# class BackgroundTaskManager:
+    # def __init__(self, logger=None):
+    #     self.logger = logger or logging.getLogger('background_task')
+    #     self.threads = []
+
+    # def run(self, target_function, *args, **kwargs):
+    #     def run_wrapper():
+    #         try:
+    #             self.logger.info(f"Running function: {target_function.__name__}")
+    #             target_function(*args, **kwargs)
+    #         except Exception as e:
+    #             self.logger.error(f"Error in background thread: {e}")
+    #         finally:
+    #             self.logger.info(f"Task {target_function.__name__} completed")
+
+    #     thread = threading.Thread(target=run_wrapper, daemon=True)
+    #     thread.start()
+    #     self.threads.append(thread)
+    #     return thread
+
+    # def wait_for_all(self):
+    #     for thread in self.threads:
+    #         thread.join()
+
+
+class BackgroundTaskManager:
+    def __init__(self, logger=None):
+        self.logger = logger or logging.getLogger('background_task')
+        self.threads = []
+
+    def run(self, target_function, *args, **kwargs):
+        def run_wrapper():
+            try:
+                self.logger.info(f"Running function: {target_function.__name__}")
+                target_function(*args, **kwargs)
+            except Exception as e:
+                self.logger.error(f"Error in background thread: {e}")
+            finally:
+                self.logger.info(f"Task {target_function.__name__} completed")
+
+        thread = threading.Thread(target=run_wrapper, daemon=True)
+        thread.start()
+        self.threads.append(thread)
+        return thread
+
+    def wait_for_all(self):
+        for thread in self.threads:
+            thread.join()
+
+
+class BackgroundSelenium_v2:
+    def __init__(self, session_duration_minutes=60, log_file='selenium_background.log', cookies_path='cookies.pkl'):
+        # Setup logging
+        self.setup_logging(log_file)
+        
+        # Session management
+        self.session_duration = timedelta(minutes=session_duration_minutes)
+        self.session_start_time = None
+        self.session_end_time = None
+        self.is_running = False
+        self.thread = None
+        self.driver = None
+        self.task_manager = BackgroundTaskManager(self.logger)
+        self.stop_event = threading.Event()
+
+        # Cookies configuration
+        self.cookies_path = cookies_path
+        self.cookies_loaded = False
+        
+        # Task queue
+        self.task_queue = []
+        self.queue_lock = threading.Lock()
+        self.queue_thread = None
+        self.queue_running = False
+        
+        # Register cleanup handlers
+        atexit.register(self.cleanup)
+        signal.signal(signal.SIGINT, self.signal_handler)
+        
+        # Store session info
+        self.session_info_file = 'selenium_session.json'
+
+    def check_selenium_driver(self):
+        """Check if the selenium driver is initialized and running"""
+        return self.driver is not None and self.is_running
+
+    def setup_logging(self, log_file):
+        """Setup logging configuration"""
+        self.logger = logging.getLogger('background_selenium')
+        self.logger.setLevel(logging.INFO)
+        
+        # Check if handlers already exist before adding new ones
+        if not self.logger.handlers:
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setLevel(logging.INFO)
+            
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.INFO)
+            
+            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+            file_handler.setFormatter(formatter)
+            console_handler.setFormatter(formatter)
+            
+            self.logger.addHandler(file_handler)
+            self.logger.addHandler(console_handler)
+
+    def initialize_driver(self):
+        """Initialize the Selenium WebDriver with appropriate options"""
+        self.logger.info("Initializing Chrome WebDriver...")
+        
+        options = Options()
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1920,1080")
+        
+        # Create a persistent Chrome profile directory
+        user_data_dir = os.path.join(os.getcwd(), "chrome_profile")
+        if not os.path.exists(user_data_dir):
+            os.makedirs(user_data_dir)
+        
+        # Add the user data directory to Chrome options
+        options.add_argument(f"--user-data-dir={user_data_dir}")
+        options.add_argument("--profile-directory=Default")
+        
+        # Additional options to improve session persistence
+        options.add_argument("--disable-web-security")
+        options.add_argument("--disable-site-isolation-trials")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+        
+        # Enable password saving and other preferences
+        prefs = {
+            "credentials_enable_service": True,
+            "profile.password_manager_enabled": True,
+            "autofill.profile_enabled": True,
+            "download.default_directory": os.path.join(os.getcwd(), "downloads"),
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "safebrowsing.enabled": False
+        }
+        options.add_experimental_option("prefs", prefs)
+        
+        # Create driver
+        try:
+            self.driver = webdriver.Chrome(
+                service=Service(ChromeDriverManager().install()),
+                options=options
+            )
+            self.logger.info("Chrome WebDriver initialized successfully")
+            self.driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+                "source": """
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                })
+                """
+            })
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Chrome WebDriver: {e}")
+            return False
+
+    def start_thread(self, target_function, *args, **kwargs):
+        """Start a function in a background thread with a WebDriver instance"""
+        if self.is_running:
+            self.logger.warning("Selenium is already running in background")
+            return False
+        if not self.initialize_driver():
+            return False
+
+        self.logger.info("Starting background task with Selenium")
+        self.is_running = True
+        self.task_manager.run(target_function, driver=self.driver, stop_event=self.stop_event, *args, **kwargs)
+        return True
+
+    def start(self, target_function, *args, **kwargs):
+        """Start the Selenium process in a background thread with session management"""
+        if self.is_running:
+            self.logger.warning("Selenium is already running in background")
+            return False
+        
+        # Initialize driver
+        if not self.initialize_driver():
+            return False
+        
+        # Set session timing
+        self.session_start_time = datetime.now()
+        self.session_end_time = self.session_start_time + self.session_duration
+        
+        # Save session info
+        self.save_session_info()
+        
+        # Create and start the thread
+        self.stop_event.clear()
+        self.thread = threading.Thread(
+            target=self._run_with_expiration,
+            args=(target_function, args, kwargs),
+            daemon=True
+        )
+        self.thread.start()
+        
+        self.is_running = True
+        self.logger.info(f"Selenium started in background thread. Session will expire at {self.session_end_time}")
+        return True
+
+    def _run_with_expiration(self, target_function, args, kwargs):
+        """Run the target function with expiration check"""
+        try:
+            # Add driver to the kwargs
+            kwargs['driver'] = self.driver
+            kwargs['stop_event'] = self.stop_event
+            
+            # Run the target function
+            self.logger.info(f"Running function: {target_function.__name__}")
+            target_function(*args, **kwargs)
+            
+        except Exception as e:
+            self.logger.error(f"Error in background thread: {e}")
+        finally:
+            self.cleanup_driver()
+            self.is_running = False
+            self.logger.info("Selenium background thread has completed")
+
+    def check_expiration(self):
+        """Check if the session has expired or if no session is set."""
+        if not self.is_running:
+            self.logger.info("No active session to check expiration.")
+            return True
+
+        if self.session_start_time is None or self.session_end_time is None:
+            self.logger.info("Session timing not initialized. Please start a session first.")
+            return False
+
+        if datetime.now() >= self.session_end_time:
+            self.logger.info("Session has expired.")
+            self.stop()
+            return True
+        
+        return False
+
+    def extend_session(self, additional_minutes=60):
+        """Extend the current session duration"""
+        if not self.is_running:
+            self.logger.warning("No active session to extend")
+            return False
+        
+        self.session_end_time += timedelta(minutes=additional_minutes)
+        self.logger.info(f"Session extended. New expiration time: {self.session_end_time}")
+        
+        # Update session info
+        self.save_session_info()
+        return True
+
+    def stop(self):
+        """Stop the Selenium process"""
+        if not self.is_running:
+            self.logger.warning("No active Selenium process to stop")
+            return False
+        
+        self.logger.info("Stopping Selenium background process...")
+        self.stop_event.set()
+        
+        # Wait for the thread to complete (with timeout)
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=10)
+        
+        self.cleanup_driver()
+        self.is_running = False
+        self.logger.info("Selenium background process stopped")
+        
+        # Clean up session info
+        if os.path.exists(self.session_info_file):
+            try:
+                os.remove(self.session_info_file)
+                self.logger.info("Session info removed")
+            except Exception as e:
+                self.logger.error(f"Failed to remove session info: {e}")
+        
+        return True
+
+    def cleanup_driver(self):
+        """Clean up the WebDriver resources"""
+        if self.driver:
+            try:
+                self.driver.quit()
+                self.logger.info("WebDriver resources released")
+            except Exception as e:
+                self.logger.error(f"Error closing WebDriver: {e}")
+            finally:
+                self.driver = None
+
+    def cleanup(self):
+        """Clean up resources when the program exits"""
+        if self.is_running:
+            self.stop()
+        if self.queue_running:
+            self.stop_queue()
+    
+    def signal_handler(self, sig, frame):
+        """Handle termination signals"""
+        self.logger.info(f"Received signal {sig}, cleaning up...")
+        self.cleanup()
+        # Allow normal signal processing to continue
+        signal.default_int_handler(sig, frame)
+
+    def save_cookies(self, path=None):
+        """Save current browser cookies to a file"""
+        if path is None:
+            path = self.cookies_path
+            
+        try:
+            if self.driver:
+                cookies = self.driver.get_cookies()
+                with open(path, 'wb') as file:
+                    pickle.dump(cookies, file)
+                self.logger.info(f"Cookies saved to {path}")
+                return True
+            else:
+                self.logger.error("No driver available to save cookies")
+                return False
+        except Exception as e:
+            self.logger.error(f"Error saving cookies: {e}")
+            return False
+
+    def load_cookies(self, path=None, url=None):
+        """Load cookies from file into current browser session"""
+        if path is None:
+            path = self.cookies_path
+            
+        try:
+            if not self.driver:
+                self.logger.error("No driver available to load cookies")
+                return False
+                
+            # Navigate to the domain first if provided
+            if url:
+                base_url = url.split('//', 1)[1].split('/', 1)[0]  # Extract domain
+                self.driver.get(f"https://{base_url}")
+            
+            if not os.path.exists(path):
+                self.logger.warning(f"Cookie file {path} not found")
+                return False
+                
+            with open(path, 'rb') as file:
+                cookies = pickle.load(file)
+                for cookie in cookies:
+                    # Some cookies cause issues, so try each one separately
+                    try:
+                        self.driver.add_cookie(cookie)
+                    except Exception as e:
+                        self.logger.warning(f"Error adding cookie: {e}")
+            
+            self.logger.info("Cookies loaded successfully")
+            # Refresh to apply cookies
+            self.driver.refresh()
+            self.cookies_loaded = True
+            return True
+        except Exception as e:
+            self.logger.error(f"Error loading cookies: {e}")
+            self.cookies_loaded = False
+            return False
+
+    def get_to_site(self, url, driver=None, stop_event=None):
+        """Navigate to a URL with advanced handling for login flows"""
+        try:
+            self.logger.info(f'Navigating to {url}...')
+            driver = driver if driver is not None else self.driver
+            
+            # Try to load cookies first
+            cookie_path = self.cookies_path
+            cookies_loaded = self.load_cookies(path=cookie_path, url=url)
+            # Store the status in the cookies_loaded property, not overwriting the path
+            self.cookies_loaded = cookies_loaded
+            
+            # Navigate to the actual URL
+            driver.get(url)
+            self.logger.info(f'Initial navigation complete. Current URL: {driver.current_url}')
+            
+            # Check if we need to log in
+            login_indicators = ["login", "signin", "auth", "account/auth"]
+            needs_login = any(indicator in driver.current_url.lower() for indicator in login_indicators)
+            
+            # Also check for login form elements as a backup detection method
+            try:
+                login_elements = driver.find_elements(By.XPATH, "//input[@type='password']")
+                if login_elements:
+                    needs_login = True
+            except:
+                pass
+                
+            if needs_login:
+                self.logger.info("Login page detected")
+                
+                # First attempt: Wait for the user to manually log in
+                print("\n" + "="*50)
+                print("Login required. Please log in manually in the browser window.")
+                print("The automation will continue once you've logged in, cookies will be collected for automation.")
+                print("="*50 + "\n")
+                
+                # Wait for login to complete - look for elements that would appear after successful login
+                max_wait = 300  # 5 minutes max wait time
+                wait_interval = 5  # Check every 5 seconds
+                total_waited = 0
+                
+                while needs_login and total_waited < max_wait:
+                    try:
+                        # Sleep for the interval
+                        time.sleep(wait_interval)
+                        total_waited += wait_interval
+                        
+                        # Check URL again - if it changed from login page
+                        current_url = driver.current_url
+                        needs_login = any(indicator in current_url.lower() for indicator in login_indicators)
+                        
+                        if not needs_login:
+                            self.logger.info("Login detected as complete based on URL change")
+                            break
+                            
+                        # Try to find elements that would indicate successful login
+                        success_elements = driver.find_elements(By.XPATH, "//button[contains(text(), 'Log out')]")
+                        if success_elements:
+                            self.logger.info("Login detected as complete based on page elements")
+                            needs_login = False
+                            break
+                            
+                        print(f"Waiting for login... ({total_waited} seconds elapsed)")
+                            
+                    except Exception as e:
+                        self.logger.warning(f"Error while waiting for login: {e}")
+                
+                if needs_login:
+                    self.logger.warning("Login timeout reached. Proceeding anyway.")
+                else:
+                    self.logger.info("Login completed successfully")
+                    # Save the cookies for future use
+                    self.save_cookies(path=cookie_path)
+                    
+                    # Reload the target URL
+                    driver.get(url)
+            
+            # Wait for the page to load after successful login
+            try:
+                # Define elements that indicate the page is loaded - customize these for your application
+                wait = WebDriverWait(driver, 20)
+                
+                # Wait for common page elements - adjust these selectors for your specific page
+                for selector in [
+                    (By.TAG_NAME, "body"),  # Basic element
+                    (By.TAG_NAME, "header"),  # Common header element
+                    (By.TAG_NAME, "main"),   # Common main content element
+                ]:
+                    try:
+                        wait.until(EC.presence_of_element_located(selector))
+                        self.logger.info(f"Found element {selector}")
+                        break
+                    except:
+                        continue
+                        
+                self.logger.info("Page loaded successfully")
+                
+            except Exception as e:
+                self.logger.warning(f"Timeout or error waiting for page elements: {e}")
+                
+            # Take a screenshot for debugging
+            try:
+                screenshot_path = os.path.join(os.getcwd(), "navigation_result.png")
+                driver.save_screenshot(screenshot_path)
+                self.logger.info(f"Screenshot saved to {screenshot_path}")
+            except Exception as e:
+                self.logger.warning(f"Failed to take screenshot: {e}")
+                
+            # Print final status
+            self.logger.info(f'Navigation complete. Final URL: {driver.current_url}')
+            
+        except Exception as e:
+            self.logger.error(f'Error navigating to URL {url}: {e}')
+ 
+    def wait_for_element(self, driver, locator_type, locator, timeout=10, condition=EC.element_to_be_clickable):
+        """Utility function to wait for an element with proper error handling."""
+        try:
+            element = WebDriverWait(driver, timeout).until(
+                condition((locator_type, locator))
+            )
+            return element
+        except TimeoutException:
+            self.logger.error(f"Timeout waiting for element: {locator}")
+            # Take a screenshot to help debug
+            screenshot_path = os.path.join(os.getcwd(), "element_wait_error.png")
+            driver.save_screenshot(screenshot_path)
+            self.logger.error(f"Screenshot saved to {screenshot_path}")
+            self.logger.error(f"Current URL: {driver.current_url}")
+            # Raise the exception after logging
+            raise
+
+    def click_element(self, driver, locator_type, locator, timeout=10, description=None):
+        """Find and click an element."""
+        element_desc = description or f"{locator_type}='{locator}'"
+        self.logger.info(f"Clicking element: {element_desc}")
+        
+        try:
+            element = self.wait_for_element(driver, locator_type, locator, timeout)
+            element.click()
+            self.logger.info(f"Successfully clicked element: {element_desc}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error clicking element {element_desc}: {e}")
+            screenshot_path = os.path.join(os.getcwd(), "click_error.png")
+            driver.save_screenshot(screenshot_path)
+            self.logger.info(f"Screenshot saved to {screenshot_path}")
+            return False
+
+    def fill_element(self, driver, locator_type, locator, text, timeout=10, description=None, clear_first=True):
+        """Find and fill an input element with text."""
+        element_desc = description or f"{locator_type}='{locator}'"
+        self.logger.info(f"Filling element {element_desc} with text: {text}")
+        
+        try:
+            element = self.wait_for_element(driver, locator_type, locator, timeout, condition=EC.visibility_of_element_located)
+            
+            if clear_first:
+                element.clear()
+                
+            element.send_keys(text)
+            self.logger.info(f"Successfully filled element: {element_desc}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error filling element {element_desc}: {e}")
+            screenshot_path = os.path.join(os.getcwd(), "fill_error.png")
+            driver.save_screenshot(screenshot_path)
+            self.logger.info(f"Screenshot saved to {screenshot_path}")
+            return False
+
+    def select_dropdown_item(self, driver, dropdown_locator, dropdown_type, item_locator, item_type, 
+                            dropdown_description=None, item_description=None, wait_time=2, timeout=10):
+        """Select an item from a dropdown menu.
+        
+        Args:
+            driver: WebDriver instance
+            dropdown_locator: Locator string for the dropdown element
+            dropdown_type: By.* type for the dropdown element
+            item_locator: Locator string for the item to select
+            item_type: By.* type for the item element
+            dropdown_description: Human-readable description of the dropdown
+            item_description: Human-readable description of the item
+            wait_time: Time to wait after clicking dropdown before selecting item
+            timeout: Maximum time to wait for elements
+        """
+        dropdown_desc = dropdown_description or f"{dropdown_type}='{dropdown_locator}'"
+        item_desc = item_description or f"{item_type}='{item_locator}'"
+        
+        self.logger.info(f"Selecting {item_desc} from dropdown {dropdown_desc}")
+        
+        try:
+            # Click the dropdown to open it
+            dropdown_clicked = self.click_element(
+                driver, 
+                dropdown_type, 
+                dropdown_locator,
+                timeout=timeout,
+                description=dropdown_desc
+            )
+            
+            if not dropdown_clicked:
+                self.logger.error(f"Failed to open dropdown {dropdown_desc}")
+                return False
+                
+            # Wait for dropdown to expand
+            time.sleep(wait_time)
+            
+            # Click the desired item
+            item_clicked = self.click_element(
+                driver,
+                item_type,
+                item_locator,
+                timeout=timeout,
+                description=item_desc
+            )
+            
+            if not item_clicked:
+                self.logger.error(f"Failed to select item {item_desc} from dropdown")
+                return False
+                
+            self.logger.info(f"Successfully selected {item_desc} from dropdown {dropdown_desc}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error during dropdown selection: {e}")
+            screenshot_path = os.path.join(os.getcwd(), "dropdown_error.png")
+            driver.save_screenshot(screenshot_path)
+            self.logger.info(f"Screenshot saved to {screenshot_path}")
+            return False
+
+    def select_database(self, driver, database_name, timeout=10):
+        """Select a database from the dropdown."""
+        self.logger.info(f"Selecting database: {database_name}")
+        
+        return self.select_dropdown_item(
+            driver=driver,
+            dropdown_locator="//span[contains(@class, 'ant-select-selection-item')]/div[contains(@class, 'css-1jje2m4')]",
+            dropdown_type=By.XPATH,
+            item_locator=f"//div[contains(@class, 'ant-select-item-option')]//span[@title='{database_name}']",
+            item_type=By.XPATH,
+            dropdown_description="Database dropdown",
+            item_description=f"'{database_name}' database",
+            timeout=timeout
+        )
+
+    def select_schema(self, driver, schema_name, timeout=10):
+        """Select a schema from the dropdown."""
+        self.logger.info(f"Selecting schema: {schema_name}")
+        
+        return self.select_dropdown_item(
+            driver=driver,
+            dropdown_locator=f"//span[contains(@class, 'ant-select-selection-item') and @title='{schema_name}']",
+            dropdown_type=By.XPATH,
+            item_locator=f"//div[@title='{schema_name}']",
+            item_type=By.XPATH,
+            dropdown_description="Schema dropdown",
+            item_description=f"'{schema_name}' schema",
+            timeout=timeout
+        )
+
+    def enter_query_into_editor(self, driver, query_text, timeout=10):
+        try:
+            # Try using JavaScript for ACE editor
+            self.logger.info("Setting SQL query using JavaScript")
+            driver.execute_script(
+                f"ace.edit('ace-editor').setValue(`{query_text}`);",
+            )
+            self.logger.info("Successfully set SQL query text")
+        except Exception as js_error:
+            self.logger.warning(f"JavaScript approach failed: {js_error}, trying standard approach")
+            # Fallback to standard approach
+            editor_filled = self.fill_element(
+                driver,
+                By.ID,
+                "ace-editor",
+                query_text,
+                timeout=timeout,
+                description="SQL editor"
+            )
+            if not editor_filled:
+                self.logger.error("Failed to set SQL query text")
+                return False
+
+    def run_sql_query(self, driver, query_text, timeout=10):
+        """Enter and run a SQL query."""
+        self.logger.info("Running SQL query")
+        
+        try:
+            # Clear and fill the SQL editor
+            # Note: For complex editors like ACE, we might need a custom approach
+            try:
+                # Try using JavaScript for ACE editor
+                self.logger.info("Setting SQL query using JavaScript")
+                driver.execute_script(
+                    f"ace.edit('ace-editor').setValue(`{query_text}`);",
+                )
+                self.logger.info("Successfully set SQL query text")
+            except Exception as js_error:
+                self.logger.warning(f"JavaScript approach failed: {js_error}, trying standard approach")
+                # Fallback to standard approach
+                editor_filled = self.fill_element(
+                    driver,
+                    By.ID,
+                    "ace-editor",
+                    query_text,
+                    timeout=timeout,
+                    description="SQL editor"
+                )
+                if not editor_filled:
+                    self.logger.error("Failed to set SQL query text")
+                    return False
+            
+            # Allow time to see the query in the editor
+            time.sleep(2)
+            
+            # Find and click the Run button
+            run_success = self.click_element(
+                driver,
+                By.CSS_SELECTOR,
+                "button.superset-button-primary",
+                timeout=timeout,
+                description="Run SQL button"
+            )
+            
+            if not run_success:
+                self.logger.error("Failed to click Run SQL button")
+                return False
+            
+            # Wait for results to load
+            self.logger.info("Waiting for query results...")
+            try:
+                results_element = self.wait_for_element(
+                    driver,
+                    By.CSS_SELECTOR,
+                    ".filterable-table-container",
+                    timeout=120,  # Longer timeout for query execution
+                    condition=EC.visibility_of_element_located
+                )
+                self.logger.info("Query executed successfully, results displayed")
+                
+                # Take a screenshot of the results
+                screenshot_path = os.path.join(os.getcwd(), "query_results.png")
+                driver.save_screenshot(screenshot_path)
+                self.logger.info(f"Results screenshot saved to {screenshot_path}")
+                
+                return True
+            except Exception as e:
+                self.logger.error(f"Error waiting for query results: {e}")
+                screenshot_path = os.path.join(os.getcwd(), "query_error.png")
+                driver.save_screenshot(screenshot_path)
+                self.logger.info(f"Error screenshot saved to {screenshot_path}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error running SQL query: {e}")
+            screenshot_path = os.path.join(os.getcwd(), "sql_run_error.png")
+            driver.save_screenshot(screenshot_path)
+            self.logger.info(f"Screenshot saved to {screenshot_path}")
+            return False
+
+    def setup_sql_environment(self, driver, database_name, schema_name, continue_on_error=False):
+        """Set up the SQL environment by selecting database and schema."""
+        self.logger.info(f"Setting up SQL environment: database={database_name}, schema={schema_name}")
+        
+        # Select database
+        database_selected = self.select_database(driver, database_name)
+        if not database_selected and not continue_on_error:
+            manual_continue = input("Could not select database. Do you want to continue? (y/n): ")
+            if manual_continue.lower() != 'y':
+                self.logger.info("User chose to abort after database selection failure")
+                return False
+        
+        # Select schema
+        schema_selected = self.select_schema(driver, schema_name)
+        if not schema_selected and not continue_on_error:
+            manual_continue = input("Could not select schema. Do you want to continue? (y/n): ")
+            if manual_continue.lower() != 'y':
+                self.logger.info("User chose to abort after schema selection failure")
+                return False
+        
+        self.logger.info("SQL environment setup complete")
+        return database_selected and schema_selected
+
+    def sql_workflow(self, driver=None, stop_event=None, url=None, query=None):
+        """Complete SQL workflow: navigate, setup environment, run query."""
+        try:
+            # Navigate to SQL page
+            self.get_to_site(url, driver, stop_event)
+            
+            # Set up SQL environment
+            success = self.setup_sql_environment(
+                driver=driver, 
+                database_name="Airdrop campaign", 
+                schema_name="public"
+            )
+            
+            if not success:
+                self.logger.warning("SQL environment setup failed or was aborted")
+                return
+            
+            # If a query was provided, run it
+            if query:
+                query_success = self.run_sql_query(driver, query)
+                if query_success:
+                    self.logger.info("SQL query executed successfully")
+                else:
+                    self.logger.warning("SQL query execution failed")
+            
+        except Exception as e:
+            self.logger.error(f"Error in SQL workflow: {e}")
+
+    # Task Queue Methods
+    def start_queue_processor(self):
+        """Start a background thread that processes tasks from the queue with session management"""
+        if self.queue_thread and self.queue_thread.is_alive():
+            self.logger.warning("Task queue is already running")
+            return False
+            
+        if not self.initialize_driver():
+            self.logger.error("Failed to initialize driver for task queue")
+            return False
+            
+        # Set up session timing
+        self.session_start_time = datetime.now()
+        self.session_end_time = self.session_start_time + self.session_duration
+        
+        # Save session info
+        self.save_session_info()
+        
+        self.queue_running = True
+        self.is_running = True
+        self.queue_thread = threading.Thread(
+            target=self._process_queue_with_expiration,
+            daemon=True
+        )
+        self.queue_thread.start()
+        self.logger.info(f"Task queue processor started. Session will expire at {self.session_end_time}")
+        return True
+        
+    def _process_queue_with_expiration(self):
+        """Process tasks from the queue until stopped or session expires"""
+        try:
+            while self.queue_running and not self.stop_event.is_set():
+                # Check for session expiration
+                if datetime.now() >= self.session_end_time:
+                    self.logger.info("Session has expired.")
+                    break
+                    
+                task = None
+                with self.queue_lock:
+                    if self.task_queue:
+                        task = self.task_queue.pop(0)
+                        
+                if task:
+                    func, args, kwargs = task
+                    try:
+                        # Add standard parameters
+                        kwargs['driver'] = self.driver
+                        kwargs['stop_event'] = self.stop_event
+                        self.logger.info(f"Executing task: {func.__name__}")
+                        func(*args, **kwargs)
+                    except Exception as e:
+                        self.logger.error(f"Error executing task {func.__name__}: {e}")
+                        # Take a screenshot for troubleshooting
+                        if self.driver:
+                            screenshot_path = os.path.join(os.getcwd(), f"task_error_{func.__name__}.png")
+                            try:
+                                self.driver.save_screenshot(screenshot_path)
+                                self.logger.info(f"Error screenshot saved to {screenshot_path}")
+                            except:
+                                pass
+                else:
+                    # No tasks, sleep briefly
+                    time.sleep(0.1)
+        except Exception as e:
+            self.logger.error(f"Error in queue processor: {e}")
+        finally:
+            # Clean up resources
+            self.logger.info("Queue processor stopping, cleaning up resources")
+            self.cleanup_driver()
+            self.is_running = False
+            self.queue_running = False
+            
+            # Clean up session info
+            if os.path.exists(self.session_info_file):
+                try:
+                    os.remove(self.session_info_file)
+                    self.logger.info("Session info removed")
+                except Exception as e:
+                    self.logger.error(f"Failed to remove session info: {e}")
+                
+    def add_task(self, func, *args, **kwargs):
+        """Add a task to the queue for execution"""
+        with self.queue_lock:
+            self.task_queue.append((func, args, kwargs))
+        self.logger.info(f"Task added to queue: {func.__name__}")
+        return True
+        
+    def extend_queue_session(self, additional_minutes=60):
+        """Extend the current session duration for the task queue"""
+        if not self.queue_running:
+            self.logger.warning("No active queue session to extend")
+            return False
+        
+        self.session_end_time += timedelta(minutes=additional_minutes)
+        self.logger.info(f"Session extended. New expiration time: {self.session_end_time}")
+        
+        # Update session info
+        self.save_session_info()
+        return True
+        
+    def stop_queue(self):
+        """Stop the task queue processor"""
+        if not self.queue_running:
+            self.logger.warning("Task queue is not running")
+            return False
+            
+        self.logger.info("Stopping task queue processor...")
+        self.queue_running = False
+        self.stop_event.set()
+        
+        if self.queue_thread and self.queue_thread.is_alive():
+            self.queue_thread.join(timeout=10)
+            
+        self.logger.info("Task queue processor stopped")
+        return True
+        
+    def wait_for_queue_empty(self, timeout=None):
+        """Wait until the task queue is empty or timeout is reached"""
+        start_time = time.time()
+        while self.queue_running:
+            with self.queue_lock:
+                if not self.task_queue:
+                    return True
+            
+            if timeout and (time.time() - start_time > timeout):
+                self.logger.warning(f"Timeout reached waiting for queue to empty ({timeout}s)")
+                return False
+                
+            time.sleep(0.5)
+            
+        return not self.task_queue
+        
+    def save_session_info(self):
+        """Save session information to a file"""
+        try:
+            session_info = {
+                "session_start": self.session_start_time.isoformat() if self.session_start_time else None,
+                "session_end": self.session_end_time.isoformat() if self.session_end_time else None,
+                "is_running": self.is_running,
+                "queue_running": self.queue_running,
+                "tasks_count": len(self.task_queue)
+            }
+            
+            with open(self.session_info_file, 'w') as f:
+                import json
+                json.dump(session_info, f)
+                
+            self.logger.info("Session info saved")
+        except Exception as e:
+            self.logger.error(f"Error saving session info: {e}")
+            
+    def load_session_info(self):
+        """Load session information from a file"""
+        if not os.path.exists(self.session_info_file):
+            return False
+        
+        try:
+            with open(self.session_info_file, 'r') as f:
+                import json
+                session_info = json.load(f)
+            
+            self.session_start_time = datetime.fromisoformat(session_info.get("session_start")) if session_info.get("session_start") else None
+            self.session_end_time = datetime.fromisoformat(session_info.get("session_end")) if session_info.get("session_end") else None
+            
+            # Check if the session is still valid
+            if self.session_end_time and datetime.now() < self.session_end_time:
+                self.logger.info(f"Found valid session, expires at {self.session_end_time}")
+                return True
+            else:
+                self.logger.info("Found expired session")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Failed to load session info: {e}")
+            return False
+
+class BackgroundSelenium:
+    def __init__(self, session_duration_minutes=60, log_file='selenium_background.log', cookies_path=None):
+        # Setup logging
+        self.setup_logging(log_file)
+        
+        # Session management
+        self.session_duration = timedelta(minutes=session_duration_minutes)
+        self.session_start_time = None
+        self.session_end_time = None
+        self.is_running = False
+        self.thread = None
+        self.driver = None
+        self.task_manager = BackgroundTaskManager(self.logger)
+        self.stop_event = threading.Event()
+
+        # Cookies configuration
+        self.cookies_path = cookies_path
+        self.cookies_loaded = False
+        
+        # Register cleanup handlers
+        atexit.register(self.cleanup)
+        signal.signal(signal.SIGINT, self.signal_handler)
+        
+        # Store session info
+        self.session_info_file = 'selenium_session.json'
+
+    def check_selenium_driver(self):
+        pass
+
+    def setup_logging(self, log_file):
+        """Setup logging configuration"""
+        self.logger = logging.getLogger('background_selenium')
+        self.logger.setLevel(logging.INFO)
+        
+        # Check if handlers already exist before adding new ones
+        if not self.logger.handlers:
+            file_handler = logging.FileHandler(log_file)
+            file_handler.setLevel(logging.INFO)
+            
+            console_handler = logging.StreamHandler()
+            console_handler.setLevel(logging.INFO)
+            
+            formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
+            file_handler.setFormatter(formatter)
+            console_handler.setFormatter(formatter)
+            
+            self.logger.addHandler(file_handler)
+            self.logger.addHandler(console_handler)
+
+    def initialize_driver(self):
+        """Initialize the Selenium WebDriver with appropriate options"""
+        self.logger.info("Initializing Chrome WebDriver...")
+        
+        options = Options()
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1920,1080")
+        
+        # Create a persistent Chrome profile directory
+        user_data_dir = os.path.join(os.getcwd(), "chrome_profile")
+        if not os.path.exists(user_data_dir):
+            os.makedirs(user_data_dir)
+        
+        # Add the user data directory to Chrome options
+        options.add_argument(f"--user-data-dir={user_data_dir}")
+        options.add_argument("--profile-directory=Default")
+        
+        # Additional options to improve session persistence
+        options.add_argument("--disable-web-security")
+        options.add_argument("--disable-site-isolation-trials")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+        
+        # Enable password saving and other preferences
+        prefs = {
+            "credentials_enable_service": True,
+            "profile.password_manager_enabled": True,
+            "autofill.profile_enabled": True,
+            "download.default_directory": os.path.join(os.getcwd(), "downloads"),
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "safebrowsing.enabled": False
+        }
+        options.add_experimental_option("prefs", prefs)
+        
+        # Create driver
+        try:
+            self.driver = webdriver.Chrome(
+                service=Service(ChromeDriverManager().install()),
+                options=options
+            )
+            self.logger.info("Chrome WebDriver initialized successfully")
+            return True
+        except Exception as e:
+            self.logger.error(f"Failed to initialize Chrome WebDriver: {e}")
+            return False
+
+
+    def start_thread(self, target_function, *args, **kwargs):
+        if self.is_running:
+            self.logger.warning("Selenium is already running in background")
+            return False
+        if not self.initialize_driver():
+            return False
+
+        self.logger.info("Starting background task with Selenium")
+        self.is_running = True
+        self.task_manager.run(target_function, driver=self.driver, stop_event=self.stop_event, *args, **kwargs)
+        return True
+
+    def start(self, target_function, *args, **kwargs):
+        """Start the Selenium process in a background thread"""
+        if self.is_running:
+            self.logger.warning("Selenium is already running in background")
+            return False
+        
+        # Initialize driver
+        if not self.initialize_driver():
+            return False
+        
+        # Set session timing
+        self.session_start_time = datetime.now()
+        self.session_end_time = self.session_start_time + self.session_duration
+        
+        # Save session info
+        self.save_session_info()
+        
+        # Create and start the thread
+        self.stop_event.clear()
+        self.thread = threading.Thread(
+            target=self._run_with_expiration,
+            args=(target_function, args, kwargs),
+            daemon=True
+        )
+        self.thread.start()
+        
+        self.is_running = True
+        self.logger.info(f"Selenium started in background thread. Session will expire at {self.session_end_time}")
+        return True
+
+    def _run_with_expiration(self, target_function, args, kwargs):
+        """Run the target function with expiration check"""
+        try:
+            # Add driver to the kwargs
+            kwargs['driver'] = self.driver
+            kwargs['stop_event'] = self.stop_event
+            
+            # Run the target function
+            self.logger.info(f"Running function: {target_function.__name__}")
+            target_function(*args, **kwargs)
+            
+        except Exception as e:
+            self.logger.error(f"Error in background thread: {e}")
+        finally:
+            self.cleanup_driver()
+            self.is_running = False
+            self.logger.info("Selenium background thread has completed")
+
+    def check_expiration(self):
+        """Check if the session has expired or if no session is set."""
+        if not self.is_running:
+            self.logger.info("No active session to check expiration.")
+            return True
+
+        if self.session_start_time is None or self.session_end_time is None:
+            self.logger.info("Session timing not initialized. Please start a session first.")
+            return False
+
+        if datetime.now() >= self.session_end_time:
+            self.logger.info("Session has expired.")
+            self.stop()
+            return True
+        
+        return False
+
+    def extend_session(self, additional_minutes=60):
+        """Extend the current session duration"""
+        if not self.is_running:
+            self.logger.warning("No active session to extend")
+            return False
+        
+        self.session_end_time += timedelta(minutes=additional_minutes)
+        self.logger.info(f"Session extended. New expiration time: {self.session_end_time}")
+        
+        # Update session info
+        self.save_session_info()
+        return True
+
+    def stop(self):
+        """Stop the Selenium process"""
+        if not self.is_running:
+            self.logger.warning("No active Selenium process to stop")
+            return False
+        
+        self.logger.info("Stopping Selenium background process...")
+        self.stop_event.set()
+        
+        # Wait for the thread to complete (with timeout)
+        if self.thread and self.thread.is_alive():
+            self.thread.join(timeout=10)
+        
+        self.cleanup_driver()
+        self.is_running = False
+        self.logger.info("Selenium background process stopped")
+        
+        # Clean up session info
+        if os.path.exists(self.session_info_file):
+            try:
+                os.remove(self.session_info_file)
+                self.logger.info("Session info removed")
+            except Exception as e:
+                self.logger.error(f"Failed to remove session info: {e}")
+        
+        return True
+
+    def cleanup_driver(self):
+        """Clean up the WebDriver resources"""
+        if self.driver:
+            try:
+                self.driver.quit()
+                self.logger.info("WebDriver resources released")
+            except Exception as e:
+                self.logger.error(f"Error closing WebDriver: {e}")
+            finally:
+                self.driver = None
+
+    def cleanup(self):
+        """Clean up resources when the program exits"""
+        if self.is_running:
+            self.stop()
+    
+    def signal_handler(self, sig, frame):
+        """Handle termination signals"""
+        self.logger.info(f"Received signal {sig}, cleaning up...")
+        self.cleanup()
+        # Allow normal signal processing to continue
+        signal.default_int_handler(sig, frame)
+
+    def save_cookies(self, path='cookies.pkl'):
+        """Save current browser cookies to a file"""
+        try:
+            if self.driver:
+                cookies = self.driver.get_cookies()
+                with open(path, 'wb') as file:
+                    pickle.dump(cookies, file)
+                self.logger.info(f"Cookies saved to {path}")
+                return True
+            else:
+                self.logger.error("No driver available to save cookies")
+                return False
+        except Exception as e:
+            self.logger.error(f"Error saving cookies: {e}")
+            return False
+
+    def load_cookies(self, path='cookies.pkl', url=None):
+        """Load cookies from file into current browser session"""
+        try:
+            if not self.driver:
+                self.logger.error("No driver available to load cookies")
+                return False
+                
+            # Navigate to the domain first if provided
+            if url:
+                base_url = url.split('//', 1)[1].split('/', 1)[0]  # Extract domain
+                self.driver.get(f"https://{base_url}")
+            
+            if not os.path.exists(path):
+                self.logger.warning(f"Cookie file {path} not found")
+                return False
+                
+            with open(path, 'rb') as file:
+                cookies = pickle.load(file)
+                for cookie in cookies:
+                    # Some cookies cause issues, so try each one separately
+                    try:
+                        self.driver.add_cookie(cookie)
+                    except Exception as e:
+                        self.logger.warning(f"Error adding cookie: {e}")
+            
+            self.logger.info("Cookies loaded successfully")
+            # Refresh to apply cookies
+            self.driver.refresh()
+            self.cookies_loaded = True
+            self.cookies_path = path
+            return True, path
+        except Exception as e:
+            self.logger.error(f"Error loading cookies: {e}")
+            self.cookies_loaded = False
+            return False, path
+
+    def get_to_site(self, url, driver=None, stop_event=None):
+        """Navigate to a URL with advanced handling for login flows"""
+        try:
+            self.logger.info(f'Navigating to {url}...')
+            driver = driver if driver is not None else self.driver
+            
+            # Try to load cookies first
+            # cookie_path = self.cookies_path
+            cookies_loaded, cookie_path = self.load_cookies(url=url)
+            self.cookies_loaded = cookies_loaded
+            
+            # Navigate to the actual URL
+            driver.get(url)
+            self.logger.info(f'Initial navigation complete. Current URL: {driver.current_url}')
+            
+            # Check if we need to log in
+            login_indicators = ["login", "signin", "auth", "account/auth"]
+            needs_login = any(indicator in driver.current_url.lower() for indicator in login_indicators)
+            
+            # Also check for login form elements as a backup detection method
+            try:
+                login_elements = driver.find_elements(By.XPATH, "//input[@type='password']")
+                if login_elements:
+                    needs_login = True
+            except:
+                pass
+                
+            if needs_login:
+                self.logger.info("Login page detected")
+                
+                # First attempt: Wait for the user to manually log in
+                print("\n" + "="*50)
+                print("Login required. Please log in manually in the browser window.")
+                print("The automation will continue once you've logged in, cookies will be collected for automation.")
+                print("="*50 + "\n")
+                
+                # Wait for login to complete - look for elements that would appear after successful login
+                max_wait = 300  # 5 minutes max wait time
+                wait_interval = 5  # Check every 5 seconds
+                total_waited = 0
+                
+                while needs_login and total_waited < max_wait:
+                    try:
+                        # Sleep for the interval
+                        time.sleep(wait_interval)
+                        total_waited += wait_interval
+                        
+                        # Check URL again - if it changed from login page
+                        current_url = driver.current_url
+                        needs_login = any(indicator in current_url.lower() for indicator in login_indicators)
+                        
+                        if not needs_login:
+                            self.logger.info("Login detected as complete based on URL change")
+                            break
+                            
+                        # Try to find elements that would indicate successful login
+                        success_elements = driver.find_elements(By.XPATH, "//button[contains(text(), 'Log out')]")
+                        if success_elements:
+                            self.logger.info("Login detected as complete based on page elements")
+                            needs_login = False
+                            break
+                            
+                        print(f"Waiting for login... ({total_waited} seconds elapsed)")
+                            
+                    except Exception as e:
+                        self.logger.warning(f"Error while waiting for login: {e}")
+                
+                if needs_login:
+                    self.logger.warning("Login timeout reached. Proceeding anyway.")
+                else:
+                    self.logger.info("Login completed successfully")
+                    # Save the cookies for future use
+                    self.save_cookies(path=cookie_path)
+                    
+                    # Reload the target URL
+                    driver.get(url)
+            
+            # Wait for the page to load after successful login
+            try:
+                # Define elements that indicate the page is loaded - customize these for your application
+                wait = WebDriverWait(driver, 20)
+                
+                # Wait for common page elements - adjust these selectors for your specific page
+                for selector in [
+                    (By.TAG_NAME, "body"),  # Basic element
+                    (By.TAG_NAME, "header"),  # Common header element
+                    (By.TAG_NAME, "main"),   # Common main content element
+                ]:
+                    try:
+                        wait.until(EC.presence_of_element_located(selector))
+                        self.logger.info(f"Found element {selector}")
+                        break
+                    except:
+                        continue
+                        
+                self.logger.info("Page loaded successfully")
+                
+            except Exception as e:
+                self.logger.warning(f"Timeout or error waiting for page elements: {e}")
+                
+            # Take a screenshot for debugging
+            try:
+                screenshot_path = os.path.join(os.getcwd(), "navigation_result.png")
+                driver.save_screenshot(screenshot_path)
+                self.logger.info(f"Screenshot saved to {screenshot_path}")
+            except Exception as e:
+                self.logger.warning(f"Failed to take screenshot: {e}")
+                
+            # Print final status
+            self.logger.info(f'Navigation complete. Final URL: {driver.current_url}')
+            
+        except Exception as e:
+            self.logger.error(f'Error navigating to URL {url}: {e}')
+            
+        return
+ 
+    def wait_for_element(self, driver, locator_type, locator, timeout=10, condition=EC.element_to_be_clickable):
+        """Utility function to wait for an element with proper error handling."""
+        try:
+            element = WebDriverWait(driver, timeout).until(
+                condition((locator_type, locator))
+            )
+            return element
+        except TimeoutException:
+            self.logger.error(f"Timeout waiting for element: {locator}")
+            # Take a screenshot to help debug
+            screenshot_path = os.path.join(os.getcwd(), "element_wait_error.png")
+            driver.save_screenshot(screenshot_path)
+            self.logger.error(f"Screenshot saved to {screenshot_path}")
+            self.logger.error(f"Current URL: {driver.current_url}")
+            # Raise the exception after logging
+            raise
+
+    def click_element(self, driver, locator_type, locator, timeout=10, description=None):
+        """Find and click an element."""
+        element_desc = description or f"{locator_type}='{locator}'"
+        self.logger.info(f"Clicking element: {element_desc}")
+        
+        try:
+            element = self.wait_for_element(driver, locator_type, locator, timeout)
+            element.click()
+            self.logger.info(f"Successfully clicked element: {element_desc}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error clicking element {element_desc}: {e}")
+            screenshot_path = os.path.join(os.getcwd(), "click_error.png")
+            driver.save_screenshot(screenshot_path)
+            self.logger.info(f"Screenshot saved to {screenshot_path}")
+            return False
+
+    def fill_element(self, driver, locator_type, locator, text, timeout=10, description=None, clear_first=True):
+        """Find and fill an input element with text."""
+        element_desc = description or f"{locator_type}='{locator}'"
+        self.logger.info(f"Filling element {element_desc} with text: {text}")
+        
+        try:
+            element = self.wait_for_element(driver, locator_type, locator, timeout, condition=EC.visibility_of_element_located)
+            
+            if clear_first:
+                element.clear()
+                
+            element.send_keys(text)
+            self.logger.info(f"Successfully filled element: {element_desc}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error filling element {element_desc}: {e}")
+            screenshot_path = os.path.join(os.getcwd(), "fill_error.png")
+            driver.save_screenshot(screenshot_path)
+            self.logger.info(f"Screenshot saved to {screenshot_path}")
+            return False
+
+    def select_dropdown_item(self, driver, dropdown_locator, dropdown_type, item_locator, item_type, 
+                            dropdown_description=None, item_description=None, wait_time=2, timeout=10):
+        """Select an item from a dropdown menu.
+        
+        Args:
+            driver: WebDriver instance
+            dropdown_locator: Locator string for the dropdown element
+            dropdown_type: By.* type for the dropdown element
+            item_locator: Locator string for the item to select
+            item_type: By.* type for the item element
+            dropdown_description: Human-readable description of the dropdown
+            item_description: Human-readable description of the item
+            wait_time: Time to wait after clicking dropdown before selecting item
+            timeout: Maximum time to wait for elements
+        """
+        dropdown_desc = dropdown_description or f"{dropdown_type}='{dropdown_locator}'"
+        item_desc = item_description or f"{item_type}='{item_locator}'"
+        
+        self.logger.info(f"Selecting {item_desc} from dropdown {dropdown_desc}")
+        
+        try:
+            # Click the dropdown to open it
+            dropdown_clicked = self.click_element(
+                driver, 
+                dropdown_type, 
+                dropdown_locator,
+                timeout=timeout,
+                description=dropdown_desc
+            )
+            
+            if not dropdown_clicked:
+                self.logger.error(f"Failed to open dropdown {dropdown_desc}")
+                return False
+                
+            # Wait for dropdown to expand
+            time.sleep(wait_time)
+            
+            # Click the desired item
+            item_clicked = self.click_element(
+                driver,
+                item_type,
+                item_locator,
+                timeout=timeout,
+                description=item_desc
+            )
+            
+            if not item_clicked:
+                self.logger.error(f"Failed to select item {item_desc} from dropdown")
+                return False
+                
+            self.logger.info(f"Successfully selected {item_desc} from dropdown {dropdown_desc}")
+            return True
+        except Exception as e:
+            self.logger.error(f"Error during dropdown selection: {e}")
+            screenshot_path = os.path.join(os.getcwd(), "dropdown_error.png")
+            driver.save_screenshot(screenshot_path)
+            self.logger.info(f"Screenshot saved to {screenshot_path}")
+            return False
+        
+
+    def select_database(self, driver, database_name, timeout=10):
+        """Select a database from the dropdown."""
+        self.logger.info(f"Selecting database: {database_name}")
+        
+        return self.select_dropdown_item(
+            driver=driver,
+            dropdown_locator="//span[contains(@class, 'ant-select-selection-item')]/div[contains(@class, 'css-1jje2m4')]",
+            dropdown_type=By.XPATH,
+            item_locator=f"//div[contains(@class, 'ant-select-item-option')]//span[@title='{database_name}']",
+            item_type=By.XPATH,
+            dropdown_description="Database dropdown",
+            item_description=f"'{database_name}' database",
+            timeout=timeout
+        )
+
+    def select_schema(self, driver, schema_name, timeout=10):
+        """Select a schema from the dropdown."""
+        self.logger.info(f"Selecting schema: {schema_name}")
+        
+        return self.select_dropdown_item(
+            driver=driver,
+            dropdown_locator=f"//span[contains(@class, 'ant-select-selection-item') and @title='{schema_name}']",
+            dropdown_type=By.XPATH,
+            item_locator=f"//div[@title='{schema_name}']",
+            item_type=By.XPATH,
+            dropdown_description="Schema dropdown",
+            item_description=f"'{schema_name}' schema",
+            timeout=timeout
+        )
+
+    def run_sql_query(self, driver, query_text, timeout=10):
+        """Enter and run a SQL query."""
+        self.logger.info("Running SQL query")
+        
+        try:
+            # Clear and fill the SQL editor
+            # Note: For complex editors like ACE, we might need a custom approach
+            try:
+                # Try using JavaScript for ACE editor
+                self.logger.info("Setting SQL query using JavaScript")
+                driver.execute_script(
+                    f"ace.edit('ace-editor').setValue(`{query_text}`);",
+                )
+                self.logger.info("Successfully set SQL query text")
+            except Exception as js_error:
+                self.logger.warning(f"JavaScript approach failed: {js_error}, trying standard approach")
+                # Fallback to standard approach
+                editor_filled = self.fill_element(
+                    driver,
+                    By.ID,
+                    "ace-editor",
+                    query_text,
+                    timeout=timeout,
+                    description="SQL editor"
+                )
+                if not editor_filled:
+                    self.logger.error("Failed to set SQL query text")
+                    return False
+            
+            # Allow time to see the query in the editor
+            time.sleep(2)
+            
+            # Find and click the Run button
+            run_success = self.click_element(
+                driver,
+                By.CSS_SELECTOR,
+                "button.superset-button-primary",
+                timeout=timeout,
+                description="Run SQL button"
+            )
+            
+            if not run_success:
+                self.logger.error("Failed to click Run SQL button")
+                return False
+            
+            # Wait for results to load
+            self.logger.info("Waiting for query results...")
+            try:
+                results_element = self.wait_for_element(
+                    driver,
+                    By.CSS_SELECTOR,
+                    ".filterable-table-container",
+                    timeout=120,  # Longer timeout for query execution
+                    condition=EC.visibility_of_element_located
+                )
+                self.logger.info("Query executed successfully, results displayed")
+                
+                # Take a screenshot of the results
+                screenshot_path = os.path.join(os.getcwd(), "query_results.png")
+                driver.save_screenshot(screenshot_path)
+                self.logger.info(f"Results screenshot saved to {screenshot_path}")
+                
+                return True
+            except Exception as e:
+                self.logger.error(f"Error waiting for query results: {e}")
+                screenshot_path = os.path.join(os.getcwd(), "query_error.png")
+                driver.save_screenshot(screenshot_path)
+                self.logger.info(f"Error screenshot saved to {screenshot_path}")
+                return False
+                
+        except Exception as e:
+            self.logger.error(f"Error running SQL query: {e}")
+            screenshot_path = os.path.join(os.getcwd(), "sql_run_error.png")
+            driver.save_screenshot(screenshot_path)
+            self.logger.info(f"Screenshot saved to {screenshot_path}")
+            return False
+
+    def find_download_button(self, driver):
+        """Try different strategies to find and click the download button."""
+        self.logger.info("Searching for download button")
+        
+        # Try different selectors for the download button
+        possible_selectors = [
+            # Exact selectors based on the HTML structure
+            ("XPATH", "//a[contains(@href, '/api/v1/sqllab/export/')]"),
+            ("XPATH", "//a[contains(@class, 'ant-btn')]"),
+            ("XPATH", "//a[contains(@class, 'superset-button')]"),
+            ("XPATH", "//a[.//span[contains(text(), 'Download to CSV')]]"),
+            ("XPATH", "//a[contains(., 'Download')]"),
+            ("CSS_SELECTOR", "a[href*='/api/v1/sqllab/export/']"),
+            ("CSS_SELECTOR", "a.ant-btn"),
+            ("CSS_SELECTOR", "a.superset-button")
+        ]
+        
+        for selector_type, selector in possible_selectors:
+            try:
+                self.logger.info(f"Trying to find download button with: {selector}")
+                if selector_type == "XPATH":
+                    buttons = driver.find_elements(By.XPATH, selector)
+                else:
+                    buttons = driver.find_elements(By.CSS_SELECTOR, selector)
+                    
+                if buttons:
+                    for button in buttons:
+                        try:
+                            # Check if this element might be our download button
+                            button_text = button.text.strip()
+                            button_html = button.get_attribute('outerHTML')
+                            self.logger.info(f"Found potential button: {button_text}")
+                            self.logger.info(f"HTML: {button_html[:100]}...")
+                            
+                            if 'Download' in button_text or 'download' in button_text.lower():
+                                self.logger.info(f"Found download button with text: {button_text}")
+                                return button
+                            elif 'export' in button_html or '/api/v1/sqllab/export/' in button_html:
+                                self.logger.info(f"Found download button with export in HTML")
+                                return button
+                        except Exception as e:
+                            self.logger.warning(f"Error examining button: {e}")
+                            continue
+            except Exception as e:
+                self.logger.warning(f"Error with selector {selector}: {e}")
+                continue
+        
+        # If we get here, we haven't found the button with standard selectors
+        # Try to extract from page source instead
+        try:
+            page_source = driver.page_source
+            export_urls = re.findall(r'href=[\'"]?(/api/v1/sqllab/export/[^\'" >]+)', page_source)
+            
+            if export_urls:
+                export_url = export_urls[0]
+                self.logger.info(f"Found export URL in page source: {export_url}")
+                
+                # Try to find the element using this exact URL
+                try:
+                    xpath = f"//a[contains(@href, '{export_url}')]"
+                    element = driver.find_element(By.XPATH, xpath)
+                    self.logger.info(f"Found download element using extracted URL")
+                    return element
+                except NoSuchElementException:
+                    self.logger.warning(f"Could not find element with extracted URL: {export_url}")
+                    
+                    # Return the URL for direct navigation instead
+                    return export_url
+        except Exception as e:
+            self.logger.error(f"Error extracting export URL from page source: {e}")
+        
+        self.logger.warning("No download button found")
+        return None
+
+    def download_query_results(self, driver, download_dir=None, timeout=30, stop_event=None):
+        """Download the query results as CSV and return the path to the downloaded file.
+        
+        Args:
+            driver: WebDriver instance
+            download_dir: Directory where the download will be saved
+            timeout: Maximum time to wait for download in seconds
+            stop_event: Event to check for cancellation
+            
+        Returns:
+            Path to the downloaded file or None if download failed
+        """
+        if download_dir is None:
+            download_dir = os.path.join(os.getcwd(), "downloads")
+            # Ensure download directory exists
+            if not os.path.exists(download_dir):
+                os.makedirs(download_dir)
+        
+        self.logger.info(f"Attempting to download query results to {download_dir}")
+        
+        # Get the initial count of files in the download directory
+        initial_files = set(os.listdir(download_dir))
+        self.logger.info(f"Files in download directory before download: {len(initial_files)}")
+        
+        # Try to find and click the download button
+        download_target = self.find_download_button(driver)
+        
+        if download_target:
+            # Check if download_target is a WebElement or URL string
+            if hasattr(download_target, 'tag_name'):
+                # We have a WebElement, click it
+                self.logger.info("Clicking download button...")
+                try:
+                    download_target.click()
+                    self.logger.info("Clicked download button")
+                except Exception as e:
+                    self.logger.error(f"Error clicking button: {e}")
+                    try:
+                        # Try JavaScript click as fallback
+                        driver.execute_script("arguments[0].click();", download_target)
+                        self.logger.info("Used JavaScript to click download button")
+                    except Exception as js_e:
+                        self.logger.error(f"JavaScript click also failed: {js_e}")
+                        return None
+            else:
+                # Assume it's a URL string
+                self.logger.info(f"Navigating directly to export URL: {download_target}")
+                current_url = driver.current_url
+                full_url = f"https://dashboard.tevi.tech{download_target}"
+                driver.get(full_url)
+                time.sleep(2)  # Wait for download to start
+                driver.get(current_url)  # Go back to results page
+        else:
+            self.logger.warning("Could not find download button.")
+            return None
+            
+        # Wait for download to complete
+        start_time = time.time()
+        while time.time() - start_time < timeout:
+            if stop_event and stop_event.is_set():
+                self.logger.warning("Download cancelled by stop event")
+                return None
+                
+            time.sleep(1)
+            current_files = set(os.listdir(download_dir))
+            new_files = current_files - initial_files
+            
+            # Check for new CSV files
+            csv_files = [f for f in new_files if f.endswith('.csv')]
+            if csv_files:
+                # Sort by creation time, newest first
+                csv_files.sort(key=lambda x: os.path.getctime(os.path.join(download_dir, x)), reverse=True)
+                csv_path = os.path.join(download_dir, csv_files[0])
+                
+                # Make sure the file is fully downloaded (not a partial download)
+                if not os.path.exists(csv_path + '.crdownload') and not os.path.exists(csv_path + '.part'):
+                    # Verify file size is stable (not still being written)
+                    size1 = os.path.getsize(csv_path)
+                    time.sleep(1)  # Wait a bit to check if size changes
+                    size2 = os.path.getsize(csv_path)
+                    
+                    if size1 == size2:  # File size is stable
+                        self.logger.info(f"Download completed successfully: {csv_path}")
+                        return csv_path
+
+    def setup_sql_environment(self, driver, database_name, schema_name, continue_on_error=False):
+        """Set up the SQL environment by selecting database and schema."""
+        self.logger.info(f"Setting up SQL environment: database={database_name}, schema={schema_name}")
+        
+        # Select database
+        database_selected = self.select_database(driver, database_name)
+        if not database_selected and not continue_on_error:
+            manual_continue = input("Could not select database. Do you want to continue? (y/n): ")
+            if manual_continue.lower() != 'y':
+                self.logger.info("User chose to abort after database selection failure")
+                return False
+        
+        # Select schema
+        schema_selected = self.select_schema(driver, schema_name)
+        if not schema_selected and not continue_on_error:
+            manual_continue = input("Could not select schema. Do you want to continue? (y/n): ")
+            if manual_continue.lower() != 'y':
+                self.logger.info("User chose to abort after schema selection failure")
+                return False
+        
+        self.logger.info("SQL environment setup complete")
+        return database_selected and schema_selected
+
+    def sql_workflow(self, driver=None, stop_event=None, url=None, query=None):
+        """Complete SQL workflow: navigate, setup environment, run query."""
+        try:
+            # Navigate to SQL page
+            self.get_to_site(url, driver, stop_event)
+            
+            # Set up SQL environment
+            success = self.setup_sql_environment(
+                driver=driver, 
+                database_name="Airdrop campaign", 
+                schema_name="public"
+            )
+            
+            if not success:
+                self.logger.warning("SQL environment setup failed or was aborted")
+                return
+            
+            # If a query was provided, run it
+            if query:
+                query_success = self.run_sql_query(driver, query)
+                if query_success:
+                    self.logger.info("SQL query executed successfully")
+                else:
+                    self.logger.warning("SQL query execution failed")
+            
+        except Exception as e:
+            self.logger.error(f"Error in SQL workflow: {e}")
+
+
+class LocalSelenium:
+    def __init__(self, cookie_path='cookies.pkl'):
+        self.cookie_path=cookie_path
+        self.driver=None
+        pass
+
+    def _get_selenium_driver(self):
+        options = Options()
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1920,1080")
+
+        # Create a persistent Chrome profile directory
+        user_data_dir = os.path.join(os.getcwd(), "chrome_profile")
+        if not os.path.exists(user_data_dir):
+            os.makedirs(user_data_dir)
+
+        # Add the user data directory to Chrome options
+        options.add_argument(f"--user-data-dir={user_data_dir}")
+        options.add_argument("--profile-directory=Default")
+
+        # Additional options to improve session persistence
+        options.add_argument("--disable-web-security")
+        options.add_argument("--disable-site-isolation-trials")
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option("useAutomationExtension", False)
+
+        prefs = {
+            "credentials_enable_service": True,
+            "profile.password_manager_enabled": True,
+            "autofill.profile_enabled": True,
+            "download.default_directory": os.path.join(os.getcwd(), "downloads"),
+            "download.prompt_for_download": False,
+            "download.directory_upgrade": True,
+            "safebrowsing.enabled": False
+        }
+        options.add_experimental_option("prefs", prefs)
+
+        try:
+            driver=webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+            driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+                "source": """
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                })
+                """
+            })
+        except Exception as e:
+            driver=None
+            print(f'Error create selenium driver: {e}')
+        self.driver=driver
+
+    def init_selenium(self):
+        self._get_selenium_driver()
+
+    def check_selenium_driver(self):
+        if self.driver is None:
+            self.init_selenium()
+        return self.driver
+
+    def get_to_site(self, url="https://dashboard.tevi.tech/sqllab/", driver=None, stop_event=None):
+        driver=self.check_selenium_driver()
+        if not driver:
+            print('Driver not available!')
+            return
+        
+        self.load_cookies() 
+
+        try:
+            print("Navigating to Tevi dashboard...")
+            driver.get(url=url)
+        except Exception as e:
+            print(f'Error getting to {url}: {e}')
+    
+    def site_login_handle(self):
+        driver=self.check_selenium_driver()
+        if not driver:
+            print('Driver not available!')
+            return False
+        if "/login" in driver.current_url or "sign in" in driver.page_source.lower() or "username" in driver.page_source.lower():
+            print("Detected login page")
+            autofill_login=self.superset_login_autofill()
+            if autofill_login:
+                self.save_cookies()
+            else:
+                print('Please login manually')
+
+        elif "cloudflareaccess.com" in driver.current_url:
+            print("Detected Cloudflare Access page")
+
+        else:
+            print('Login not detected!')
+
+    def superset_login_autofill(self):
+        driver=self.check_selenium_driver()
+        if not driver:
+            print('Driver not available!')
+            return False
+        
+        username, password = self.load_credentials()
+
+        try:
+            username_field = driver.find_element(By.XPATH, "//input[@name='username' or contains(@placeholder, 'Username')]")
+            password_field = driver.find_element(By.XPATH, "//input[@name='password' or @type='password' or contains(@placeholder, 'Password')]")
+            
+            username_field.clear()
+            username_field.send_keys(username)
+            password_field.clear()
+            password_field.send_keys(password)
+
+            print(f'Autofill username and password successfully')
+        
+        except Exception as e:
+            print(f'Error autofill username and password')
+            return False
+        
+
+        login_button = None
+        
+        # Method 1: Standard button selectors
+        button_selectors = [
+            "//button[contains(text(), 'SIGN IN') or contains(text(), 'Sign In') or contains(text(), 'Login') or contains(text(), 'LOG IN')]",
+            "//button[@type='submit']",
+            "//input[@type='submit']",
+            "//button[contains(@class, 'btn-primary')]",
+            "//button[contains(@class, 'login')]",
+            "//button"  # Last resort: just find any button
+        ]
+        
+        for selector in button_selectors:
+            try:
+                buttons = driver.find_elements(By.XPATH, selector)
+                if buttons:
+                    print(f"Found {len(buttons)} buttons with selector: {selector}")
+                    for button in buttons:
+                        print(f"Button text: '{button.text}', class: '{button.get_attribute('class')}'")
+                    login_button = buttons[0]
+                    break
+            except:
+                continue
+        
+        # Method 2: If no button found, try to submit the form directly
+        if not login_button:
+            try:
+                print("No button found, trying to submit the form directly...")
+                form = driver.find_element(By.XPATH, "//form")
+                driver.execute_script("arguments[0].submit();", form)
+                print("Form submitted via JavaScript")
+                time.sleep(5)
+                return True
+            except Exception as form_e:
+                print(f"Error submitting form: {form_e}")
+                
+                # Method 3: Last resort - click the blue button if it exists
+                try:
+                    print("Trying to find a blue button or any button that might be the login button...")
+                    # Find buttons with blue-ish styling
+                    blue_buttons = driver.find_elements(By.XPATH, 
+                        "//button[contains(@style, 'blue') or contains(@class, 'blue')] | " +
+                        "//button[contains(@style, 'primary') or contains(@class, 'primary')] | " +
+                        "//input[@type='submit']"
+                    )
+                    
+                    if blue_buttons:
+                        login_button = blue_buttons[0]
+                        print(f"Found potential login button with text: {login_button.text}")
+                    else:
+                        # Find any submit-like button as a last resort
+                        all_buttons = driver.find_elements(By.TAG_NAME, "button")
+                        if all_buttons:
+                            login_button = all_buttons[-1]  # Often the submit button is the last one
+                            print(f"Using last button as login: {login_button.text}")
+                        else:
+                            print("No buttons found on page!")
+                except Exception as e:
+                    print(f"Error finding any buttons: {e}")
+        
+        # Click the login button if we found one
+        if login_button:
+            try:
+                print(f"Clicking button with text: '{login_button.text}'")
+                login_button.click()
+                print("Login button clicked")
+            except Exception as click_e:
+                print(f"Error clicking button: {click_e}")
+                # Try JavaScript click
+                try:
+                    driver.execute_script("arguments[0].click();", login_button)
+                    print("Used JavaScript to click login button")
+                except:
+                    print("JavaScript click also failed")
+        else:
+            print("Could not find any login button!")
+            driver.save_screenshot("no_login_button.png")
+            return False
+        
+        print("Login form submitted. Waiting for page to load...")
+        
+        # Wait for redirection or login error
+        time.sleep(5)
+
+
+
+
+    def save_cookies(self):
+        driver=self.check_selenium_driver()
+        if not driver:
+            print('Driver not available!')
+            return False
+
+        cookies=driver.get_cookies()
+        cookie_path=self.cookie_path
+        try:
+            with open(cookie_path, 'wb') as file:
+                pickle.dump(cookies, file)
+            print(f"Cookies saved to {cookie_path}")
+        except Exception as e:
+            print(f'Error saving cookie to {cookie_path}: {e}')
+
+
+    def load_cookies(self):
+        driver=self.check_selenium_driver()
+        if not driver:
+            print('Driver not available!')
+            return False
+    
+        cookie_path=self.cookie_path
+        if not os.path.exists(cookie_path):
+            print(f"Cookie file in {cookie_path} not found")
+            return False
+        
+        add_cookie_error = 0
+        try:
+            with open(cookie_path, 'rb') as file:
+                cookies=pickle.load(file)
+                for cookie in cookies:
+                    try:
+                        driver.add_cookie(cookie)
+                    except Exception as e:
+                        add_cookie_error += 1
+                        print(f'Error adding cookie: {e}')
+                        print(f'Error cookie: {cookie}')
+        except Exception as e:
+            print(f'Error open and add cookies: {e}')
+            return False
+
+        if add_cookie_error == 0:
+            print("Cookies loaded successfully")
+        else:
+            print(f"Cookies loaded successfully with {add_cookie_error} error(s)")
+
+    def save_credentials(self):
+        """Save credentials to an encrypted file."""
+        print("First-time setup: Please enter your Tevi dashboard credentials")
+        username = input("Username: ")
+        password = getpass.getpass("Password: ")
+        
+        # Simple encryption (not secure, but better than plaintext)
+        import base64
+        encoded_username = base64.b64encode(username.encode()).decode()
+        encoded_password = base64.b64encode(password.encode()).decode()
+        
+        credentials_file = "tevi_creds.dat"
+        with open(credentials_file, "w") as f:
+            f.write(f"{encoded_username}\n{encoded_password}")
+        
+        print("Credentials saved.")
+        return username, password
+
+    def load_credentials(self):
+        """Load credentials from file."""
+        credentials_file = "tevi_creds.dat"
+        
+        if not os.path.exists(credentials_file):
+            return self.save_credentials()
+        
+        try:
+            import base64
+            with open(credentials_file, "r") as f:
+                lines = f.readlines()
+                if len(lines) >= 2:
+                    encoded_username = lines[0].strip()
+                    encoded_password = lines[1].strip()
+                    
+                    username = base64.b64decode(encoded_username.encode()).decode()
+                    password = base64.b64decode(encoded_password.encode()).decode()
+                    
+                    return username, password
+        except Exception as e:
+            print(f"Error loading credentials: {e}")
+            return self.save_credentials()
+        
+        # If we get here, something went wrong with the file format
+        return self.save_credentials()
+
+    def quit_driver(self):
+        driver=self.check_selenium_driver()
+        driver.quit()
