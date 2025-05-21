@@ -50,7 +50,7 @@ import json
 SCOPES=[
     # "https://www.googleapis.com/auth/bigquery",
     # "https://www.googleapis.com/auth/drive",
-    # "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/cloud-platform"
     ]
 
@@ -189,6 +189,7 @@ class Authorization:
         self._gspread_client = None
         self._cloud_manager = None
         self._gcs_client = None
+        self._gg_vpc = None
         
         if use_service_account:
             self._initialize_service_account(client_secret_directory)
@@ -247,6 +248,8 @@ class Authorization:
         self._gspread_client = gspread.authorize(credentials)
         self._cloud_manager = build('cloudresourcemanager', 'v1', credentials=credentials)
         self._gcs_client = storage.Client.from_service_account_json(client_secret_file_path)
+        self._gg_vpc = build("vpcaccess", "v1", credentials=credentials)
+
 
     @property
     def client(self):
@@ -279,7 +282,42 @@ class Authorization:
     @property
     def gcs_client(self):
         return self._gcs_client
+    
+    @property
+    def gg_vpc(self):
+        return self._gg_vpc
 
+
+class GoogleVPC:
+    def __init__(self, client_secret_directory, use_service_account = True):
+        self.use_service_account = use_service_account
+        self._credentials = Authorization(client_secret_directory)
+        self.client_secret_directory = client_secret_directory
+
+    @property
+    def credentials(self):
+        return self._credentials
+    
+    @credentials.setter
+    def credentials(self, new_credentials):
+        self._credentials = new_credentials
+
+    def check_cred(self):
+        if self.use_service_account:
+            # For service account, no token expiration checks are required
+            return
+        else:
+            creds = Tokenization.load_cred(client_token, self.client_secret_directory) 
+            gauth = Tokenization.load_cred(pydrive_token, self.client_secret_directory)
+            if self.credentials.client._credentials.expired or self.credentials.gauth.access_token_expired or creds is None or gauth is None:
+                self.credentials = Authorization(self.client_secret_directory)
+
+    def get_vpc_access(self):
+        self.check_cred()
+        vpc_access = self.credentials.gg_vpc
+        return vpc_access
+
+    
     
 class GoogleFile:
     def __init__(self, client_secret_directory, use_service_account = True):
@@ -800,13 +838,43 @@ class GoogleCloudPlatform:
         return cloud_manager
     
     def get_iam_policy(self, project_id):
-        self.check_cred()
         cloud_manager = self.get_cloud_manager()
         policy = cloud_manager.projects().getIamPolicy(
             resource=project_id,
             body={}
         ).execute()
         return policy
+
+    def grant_permission(self, project_id, role, member_email):
+        cloud_manager = self.get_cloud_manager()
+        policy = self.get_iam_policy(project_id=project_id)
+
+        bindings = policy.get('bindings', [])
+
+        role_binding = next((b for b in bindings if b['role'] == role), None)
+        member = f"user:{member_email}"
+
+        if role_binding:
+            if member not in role_binding['members']:
+                role_binding['members'].append(member)
+                print(f"Added {member} to existing role {role}")
+            else:
+                print(f"{member} already has role {role}")
+                return
+        else:
+            bindings.append({
+                'role': role,
+                'members': [member]
+            })
+            print(f"Created new binding for role {role} and added {member}")
+
+        # Set the updated IAM policy
+        policy['bindings'] = bindings
+        result = cloud_manager.projects().setIamPolicy(
+            resource=project_id,
+            body={'policy': policy}
+        ).execute()
+        return result
 
 
 class GoogleCloudStorage:
@@ -863,23 +931,62 @@ class GoogleCloudStorage:
         return f"gs://{bucket_name}/{destination_blob_name}"
     
 
-    def download_file(self, bucket_name, source_blob_name:Literal['file path in GCS'], destination_file_path:Literal['file path in local']=None):
+    # def download_file(self, bucket_name, source_blob_name:Literal['file path in GCS'], destination_file_path:Literal['file path in local']=None):
+    #     gcs_client = self.get_gcs_client()
+    #     bucket = gcs_client.bucket(bucket_name)
+    #     blob = bucket.blob(source_blob_name)
+        
+    #     # If no destination path is provided, use current working directory + original filename
+    #     if destination_file_path is None:
+    #         # Extract the filename from the source blob name
+    #         filename = os.path.basename(source_blob_name)
+    #         # Use current working directory
+    #         destination_file_path = os.path.join(os.getcwd(), filename)
+        
+    #     # Download the file
+    #     blob.download_to_filename(destination_file_path)
+        
+    #     print(f"File gs://{bucket_name}/{source_blob_name} downloaded to {destination_file_path}")
+    #     return destination_file_path
+    
+    def download_file(
+        self, 
+        bucket_name, 
+        source_blob_name: Literal['file path in GCS'], 
+        destination_file_path: Literal['file path in local'] = None
+    ):
+
         gcs_client = self.get_gcs_client()
         bucket = gcs_client.bucket(bucket_name)
         blob = bucket.blob(source_blob_name)
-        
-        # If no destination path is provided, use current working directory + original filename
+
+        # Determine filename from blob path
+        filename = os.path.basename(source_blob_name)
+
+        # If destination path not provided, save to CWD with original filename
         if destination_file_path is None:
-            # Extract the filename from the source blob name
-            filename = os.path.basename(source_blob_name)
-            # Use current working directory
             destination_file_path = os.path.join(os.getcwd(), filename)
-        
+        elif os.path.isdir(destination_file_path):
+            # If user passed a folder path instead of file path
+            destination_file_path = os.path.join(destination_file_path, filename)
+
+        # Create the destination folder if needed
+        os.makedirs(os.path.dirname(destination_file_path), exist_ok=True)
+
         # Download the file
         blob.download_to_filename(destination_file_path)
+
+        # Clean print path
+        try:
+            relative_path = os.path.relpath(destination_file_path)
+        except ValueError:
+            relative_path = destination_file_path
+
+        print(f"✅ Downloaded: gs://{bucket_name}/{source_blob_name}")
+        print(f"📁 Saved to: {relative_path}")
         
-        print(f"File gs://{bucket_name}/{source_blob_name} downloaded to {destination_file_path}")
         return destination_file_path
+
     
 
     def upload_dataframe_to_gcs(self, dataframe, bucket_folder_path, filename, file_format='csv', **kwargs):
@@ -963,7 +1070,8 @@ class GoogleCloudStorage:
         gcs_client = self.get_gcs_client()
         bucket = gcs_client.bucket(bucket_name)
         blobs = bucket.list_blobs(prefix=prefix)
-        return [blob.name for blob in blobs]
+        return blobs
+        # return [blob.name for blob in blobs]
 
 class CrawlingWeb:
     class Selenium:
@@ -1270,6 +1378,24 @@ class Bigquery:
             gauth = Tokenization.load_cred(pydrive_token, self.client_secret_directory)
             if self.credentials.client._credentials.expired or self.credentials.gauth.access_token_expired or creds is None or gauth is None:
                 self.credentials = Authorization(self.client_secret_directory)
+
+    def load_table_from_gcs(self, table_id, gcs_uri, file_format:Literal['PARQUET'], write_disposition='WRITE_TRUNCATE'):
+        client = self._get_bqr_client()
+        if file_format=='PARQUET':
+            source_format=bigquery.SourceFormat.PARQUET
+        else:
+            print('Incorrect File Format')
+            return False
+        job_config = bigquery.LoadJobConfig(
+            autodetect=True,
+            source_format=source_format,
+            write_disposition=write_disposition
+        )
+        job = client.load_table_from_uri(gcs_uri, table_id, job_config=job_config)
+        job.result()
+        print(f"✅ Loaded {gcs_uri} into staging table.")
+
+    
     
     def _get_bqr_client(self):
         self.check_cred()
@@ -1280,7 +1406,26 @@ class Bigquery:
         client = self._get_bqr_client()
         cred = client._credentials
         project_id = client.project
-        return cred, project_id
+        transfer_client = bigquery_datatransfer.DataTransferServiceClient(credentials=cred)
+        parent = f"projects/{project_id}/locations/{location}"
+
+        configs = transfer_client.list_transfer_configs(parent=parent)
+        scheduled_queries = []
+        for config in configs:
+            if config.data_source_id == 'scheduled_query':
+                scheduled_queries.append({
+                    'display_name': config.display_name,
+                    'sql': config.params.get('query'),
+                    'destination_table': config.params.get('destination_table_name_template'),
+                    'schedule': config.schedule,
+                    'config_name': config.name,
+                    'project_id': project_id,
+                    'location': location
+                })
+
+        df = pd.DataFrame(scheduled_queries)
+        return df
+        # return cred, project_id
 
     def drop_bigquery_table(self,table_id):
         client = self._get_bqr_client()
@@ -1321,16 +1466,30 @@ class Bigquery:
             print('Error update table schema: ', e)
 
 
-    def bigquery_operation(self, query):
+    def bigquery_operation(self, query=None, sql_file_path=None):
         client = self._get_bqr_client()
+        udf=MyFunction()
+        if sql_file_path:
+            query_string = udf._read_sql(sql_file_path=sql_file_path)
+        else:
+            query_string = query
         try:
-            query_job = client.query(query)
+            query_job = client.query(query_string)
             query_job.result()
         except Exception as e:
             print('Error running query: ',e)
+            return False
+        return True
 
-    def run_biqquery_to_df(self,query):
-        query_string = query
+        
+
+    def run_biqquery_to_df(self, query=None, sql_file_path=None):
+        udf=MyFunction()
+        if sql_file_path:
+            query_string = udf._read_sql(sql_file_path=sql_file_path)
+        else:
+            query_string = query
+
         client = self._get_bqr_client()
         try:
             query_job = client.query(query_string)
@@ -1538,6 +1697,21 @@ class Bigquery:
         table.expires = lib_dt.datetime.now() + lib_dt.timedelta(days=expiration_day)
         client.update_table(table, ['expires'])
 
+class Telegram:
+    @classmethod
+    def send_telegram_alert(cls, message, bot_token, chat_id):
+        import requests
+        try:
+            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            payload = {"chat_id": chat_id, "text": message}
+            response = requests.post(url, data=payload, timeout=5)  # Prevent long hangs
+            response.raise_for_status()
+            print(f"✅ Sent message: {response.json()}")
+        except requests.exceptions.RequestException as e:
+            print(f"⚠️ Request error: {e}")
+        except Exception as e:
+            print(f"⚠️ Unexpected error: {e}")
+
 class MyLibrary:
     def __init__(self,client_secret_directory) -> None:
         # client_secret_directory = r'C:\trieu.pham\python\bigquery'
@@ -1549,6 +1723,7 @@ class MyLibrary:
         self._selenium_v2 = BackgroundSelenium_v2()
         self._improved_selenium = ImprovedBackgroundSelenium()
         self._google_platform = GoogleCloudPlatform(client_secret_directory)
+        self._google_vpc = GoogleVPC(client_secret_directory)
     
     @property
     def bigquery(self):
@@ -1577,10 +1752,18 @@ class MyLibrary:
     @property
     def google_platform(self):
         return self._google_platform
+    
+    @property
+    def google_vpc(self):
+        return self._google_vpc
 
     @property
     def function(self):
         return MyFunction()
+    
+    @property
+    def telegram(self):
+        return Telegram()
 
 class MyFunction:
     class MyVisualization:
@@ -1759,6 +1942,45 @@ class MyFunction:
                 else:
                     idxa += 1
         return joined_list
+    
+    @classmethod
+    def generate_date_list(cls, start_date, end_date=None, ascending=True):
+        start_date = datetime.strptime(start_date, "%Y-%m-%d")
+        try:
+            if end_date:
+                end_date = datetime.strptime(end_date, "%Y-%m-%d")
+            else:
+                end_date = datetime.today()
+        except Exception as e:
+            print('Incorrect date format error: ',e)
+            return False
+
+        if ascending == True:
+            date_list=MyFunction._generate_date_list_asc(start_date=start_date, end_date=end_date)
+        elif ascending == False:
+            date_list=MyFunction._generate_date_list_desc(start_date=start_date, end_date=end_date)
+        else:
+            print('Incorrect Order')
+            return False
+        return date_list
+
+    @classmethod
+    def _generate_date_list_desc(cls, start_date, end_date):
+        date_list = []
+        current = end_date
+        while current >= start_date:
+            date_list.append(current.strftime("%Y-%m-%d"))
+            current -= timedelta(days=1)
+        return date_list
+
+    @classmethod
+    def _generate_date_list_asc(cls, start_date, end_date):
+        date_list = []
+        current = start_date
+        while current <= end_date:
+            date_list.append(current.strftime("%Y-%m-%d"))
+            current += timedelta(days=1)
+        return date_list
 
     @classmethod
     def extract_sheet_id(cls, sheet_url):
@@ -1821,6 +2043,16 @@ class MyFunction:
             return script_match.group(1)
 
         return None
+    
+    @classmethod
+    def _read_sql(cls, sql_file_path):
+        try:
+            with open(sql_file_path, "r") as f:
+                query_string = f.read()
+        except Exception as e:
+            print(f"Couldn't Read SQL File At {sql_file_path}: ", e)
+            return False
+        return query_string
     
     @classmethod
     def _read_csv(cls, file_path):
@@ -2110,7 +2342,7 @@ class MyFunction:
     
     @staticmethod
     def list_to_single_string(input, delimiter=None, wrapper = None):
-        if isinstance(input,(list,tuple)):
+        if isinstance(input,(list,tuple,set)):
             pass
         else:
             print('input must be a list or tuple')
