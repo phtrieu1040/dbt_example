@@ -1,0 +1,53 @@
+variables:
+  REGISTRY_GCP_PROJECT: tevi-app-prod
+  ARTIFACTS_REGISTRY: asia-southeast1-docker.pkg.dev/${REGISTRY_GCP_PROJECT}/data
+
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+  PREFECT_API_URL: "http://prefect-server.prefect.svc.cluster.local:4200/api"
+
+stages:
+  - build
+  - deploy
+
+.set_image:
+  before_script:
+    - export CUSTOM_CI_PROJECT_NAME=$(echo $CI_PROJECT_NAME | tr '_' '-')
+    - export DOCKER_IMAGE=${ARTIFACTS_REGISTRY}/${CUSTOM_CI_PROJECT_NAME}:${CI_COMMIT_REF_NAME}-${CI_COMMIT_SHORT_SHA}
+
+build-image:
+  stage: build
+  image: gcr.io/kaniko-project/executor:debug
+  before_script:
+    - !reference [.set_image, before_script]
+  script:
+    - >-
+      /kaniko/executor
+      --context "${CI_PROJECT_DIR}"
+      --dockerfile "Dockerfile"
+      --destination "${DOCKER_IMAGE}"
+  only:
+    - main
+  tags:
+    - k8s
+    - data
+
+deploy-flows:
+  stage: deploy
+  image: ghcr.io/astral-sh/uv:python3.10-bookworm-slim
+  before_script:
+    - !reference [.set_image, before_script]
+    - uv tool install prefect
+    - export PATH=$PATH:/root/.local/bin
+    - echo "Attempting to curl PREFECT_API_URL/api/health"
+    - curl -vfL "${PREFECT_API_URL}/api/health" || echo "curl command failed"
+  script:
+    - echo "Deploying Flows..."
+    - prefect deploy --all
+  environment:
+    name: production
+    url: $PREFECT_API_URL
+  only:
+    - main
+  tags:
+    - k8s
+    - data

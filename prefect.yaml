@@ -1,0 +1,46 @@
+# Generic metadata about this project
+name: flows
+prefect-version: 3.0.0
+
+# Handled by GitLab CI/CD
+build: null
+push: null
+pull: null
+
+# Reusable components for your deployments
+definitions:
+  tags: &common_tags
+    - "gke"
+  work_pool: &common_work_pool
+    name: "default"
+    job_variables:
+      image: "{{ $DOCKER_IMAGE }}"
+
+# Configuration for deploying flows
+deployments:
+- name: "dbt-tevi-flow"
+  tags: *common_tags
+  schedule: null
+  entrypoint: "flows/dbt_tevi_flow.py:dbt_tevi_flow"
+  work_pool: *common_work_pool
+
+
+- name: "tevi-data-dbt"
+  tags: *common_tags
+  schedule:
+    cron: "0 1 * * *"  # Run at 1 AM daily UTC
+  entrypoint: "flows/tevi_data_dbt.py:tevi_data_dbt_flow"
+  work_pool: *common_work_pool
+
+- name: "test_partition_table"
+  tags: *common_tags
+  schedule:
+  entrypoint: "flows/test_partition_table.py:test_partition_table_flow"
+  work_pool: *common_work_pool
+
+- name: "block_payout"
+  tags: *common_tags
+  schedule:
+    cron: "0 8 * * *"  # Run at 8 AM daily
+  entrypoint: "flows/block_payout.py:payout_block_clickhouse"
+  work_pool: *common_work_pool

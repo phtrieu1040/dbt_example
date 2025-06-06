@@ -1,0 +1,16 @@
+name: tevi_analytics
+version: '1.0'
+config-version: 2
+
+profile: tevi_analytics
+
+target-path: target
+clean-targets:
+  - target
+  - dbt_modules
+
+model-paths: ["models"]
+
+models:
+  tevi_analytics:
+    +schema: tevi_analytics_db 

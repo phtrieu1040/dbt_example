@@ -1,0 +1,87 @@
+version: 2
+
+models:
+  - name: authentication_user
+    description: "Original user table from tevi_core system."
+    columns:
+      - name: id
+        description: "Unique user ID."
+        tests:
+          - not_null
+          - unique
+      - name: password
+        description: "Password hash."
+      - name: last_login
+        description: "Last login timestamp."
+      - name: is_superuser
+        description: "Is the user a superuser."
+      - name: username
+        description: "Username."
+        tests:
+          - not_null
+      - name: first_name
+        description: "First name."
+      - name: last_name
+        description: "Last name."
+      - name: email
+        description: "Email address."
+      - name: is_staff
+        description: "Is staff."
+      - name: is_active
+        description: "Is active."
+      - name: date_joined
+        description: "User creation date."
+      - name: firebase_uid
+        description: "Firebase UID."
+      - name: firebase_identities
+        description: "Firebase identities."
+      - name: avatar
+        description: "User avatar."
+      - name: display_name
+        description: "Display name."
+      - name: gender
+        description: "Gender."
+      - name: phone_number
+        description: "Phone number."
+      - name: fcm_token
+        description: "FCM token."
+      - name: country
+        description: "Country."
+      - name: language
+        description: "Language."
+      - name: alias
+        description: "Alias."
+      - name: contact_email
+        description: "Contact email."
+      - name: anonymous
+        description: "Anonymous."
+      - name: deactivate_reason
+        description: "Reason for deactivation."
+      - name: deactivated_at
+        description: "Deactivation timestamp."
+      - name: deleted_at
+        description: "Deletion timestamp."
+      - name: is_deleted
+        description: "Is deleted."
+      - name: prev_alias
+        description: "Previous alias."
+      - name: suspend_reason
+        description: "Reason for suspension."
+      - name: suspended_at
+        description: "Suspension timestamp."
+      - name: edited
+        description: "Has been edited."
+      - name: guid
+        description: "GUID."
+      - name: subscription_badge_id
+        description: "Subscription badge ID."
+      - name: allow_nsfw
+        description: "Allow NSFW."
+      - name: auto_follow
+        description: "Auto follow."
+      - name: _peerdb_synced_at
+        description: "PeerDB sync timestamp."
+      - name: _peerdb_is_deleted
+        description: "PeerDB is deleted."
+      - name: _peerdb_version
+        description: "PeerDB version." 
