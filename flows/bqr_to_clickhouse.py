@@ -18,7 +18,7 @@ def set_clickhouse_env_vars():
 def run_query_to_df():
     bqr = BigQuery()
     try:
-        with open(SQL_SCRIPTS_DIR / "ops_sys__creator_payout_block.sql", "r") as file:
+        with open(SQL_SCRIPTS_DIR / "bqr_query_to_df.sql", "r") as file:
             query = file.read()
     except Exception as e:
         print(f"Error reading query file: {e}")
@@ -40,7 +40,7 @@ def write_df_to_clickhouse():
         print("❌ No data to save")
         return
     clickhouse = Clickhouse()
-    write_result = clickhouse.ingest_df(df, "tevi_data_team", "ops_sys__creator_payout_block_daily", write_disposition="WRITE_TRUNCATE", partition_by="toYYYYMM(ingest_at)", engine="MergeTree")
+    write_result = clickhouse.ingest_df(df, "dataset", "table_name", write_disposition="WRITE_TRUNCATE", partition_by="toYYYYMM(ingest_at)", engine="MergeTree")
     if write_result:
         print("✅ Data ingested to ClickHouse successfully.")
     else:
@@ -49,7 +49,7 @@ def write_df_to_clickhouse():
 @flow
 def dbt_run_payout_block():
     dbt = Dbt()
-    commands=["dbt run --select path:models/incremental_optimized/ops_sys__creator_payout_block_v2.sql"]
+    commands=["dbt run --select path:models/incremental_optimized/bqr_to_clickhouse.sql"]
     result = dbt.run_dbt_command(commands, target="clickhouse")
     if result:
         print("✅ DBT run successfully.")
