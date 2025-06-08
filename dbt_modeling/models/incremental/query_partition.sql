@@ -5,7 +5,7 @@
 ) }}
 
 select * 
-from tevi_billy.billing_tvstransaction
+from dataset.table_name
 where true
     and toDate(created_at) >= toDate('{{ var("start_date") }}')
     and toDate(created_at) < toDate('{{ var("end_date") }}')

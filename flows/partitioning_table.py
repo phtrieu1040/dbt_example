@@ -12,7 +12,7 @@ def generate_commands():
     for i in range(len(date_list) - 1):
         start = date_list[i].strftime("%Y-%m-%d")
         end = date_list[i+1].strftime("%Y-%m-%d")
-        command_line = f"dbt run --target clickhouse --select path:models/incremental/tevi_billy__billing_tvstransaction.sql --vars '{{start_date: \"{start}\", end_date: \"{end}\"}}'"
+        command_line = f"dbt run --target clickhouse --select path:models/incremental/query_partition.sql --vars '{{start_date: \"{start}\", end_date: \"{end}\"}}'"
         command_list.append(command_line)
     return command_list
 
@@ -29,13 +29,13 @@ def get_clickhouse_client():
 @flow
 def pre_hook():
     client = get_clickhouse_client()
-    client.command("drop table if exists tevi_data_team.tevi_billy__billing_tvstransaction")
+    client.command("drop table if exists dataset.table_name")
     print("table dropped")
 
 @flow
 def post_hook():
     client = get_clickhouse_client()
-    client.command("create materialized view if not exists tevi_data_team.mv__tevi_billy__billing_tvstransaction to tevi_data_team.tevi_billy__billing_tvstransaction as select * from tevi_billy.billing_tvstransaction")
+    client.command("create materialized view if not exists dataset.mv__table_name to dataset.table_name as select * from dataset.table_name")
     print("mv created")
 
 @flow
@@ -45,24 +45,27 @@ def test_partition_table():
         print(command)
     result = DbtCoreOperation(
         commands=commands,
-        project_dir="tevi_data_team_dbt",
-        profiles_dir="tevi_data_team_dbt"
+        project_dir="dbt_modeling",
+        profiles_dir="dbt_modeling"
     ).run()
     print("dbt run completed")
     print(result)
 
 @flow
-def test_partition_table_flow():
+def partitioning_table_flow():
     set_clickhouse_env_vars()
     print(os.getenv("CLICKHOUSE_HOST"))
     print(os.getenv("CLICKHOUSE_PORT"))
     print(os.getenv("CLICKHOUSE_USER"))
     print(os.getenv("CLICKHOUSE_PASSWORD"))
     result = DbtCoreOperation(
-        commands=["dbt run --target clickhouse --select path:models/incremental_optimized/ops_sys__creator_payout_block_v2.sql"],
-        project_dir="tevi_data_team_dbt",
-        profiles_dir="tevi_data_team_dbt",
-        env={"CLICKHOUSE_HOST": os.getenv("CLICKHOUSE_HOST"), "CLICKHOUSE_PORT": os.getenv("CLICKHOUSE_PORT"), "CLICKHOUSE_USER": os.getenv("CLICKHOUSE_USER"), "CLICKHOUSE_PASSWORD": os.getenv("CLICKHOUSE_PASSWORD")}
+        commands=["dbt run --target clickhouse --select path:models/incremental_optimized/query_partition.sql"],
+        project_dir="dbt_modeling",
+        profiles_dir="dbt_modeling",
+        env={"CLICKHOUSE_HOST": os.getenv("CLICKHOUSE_HOST"),
+             "CLICKHOUSE_PORT": os.getenv("CLICKHOUSE_PORT"),
+             "CLICKHOUSE_USER": os.getenv("CLICKHOUSE_USER"),
+             "CLICKHOUSE_PASSWORD": os.getenv("CLICKHOUSE_PASSWORD")}
     ).run()
     print(result)
     pre_hook()
@@ -70,5 +73,5 @@ def test_partition_table_flow():
     # post_hook()
 
 if __name__ == "__main__":
-    test_partition_table_flow()
+    partitioning_table_flow()
 
