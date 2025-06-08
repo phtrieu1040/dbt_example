@@ -131,3 +131,5 @@ test.py
 
 # dbt in progress
 tevi_data_team_dbt/models/in_progress/
+
+tevi_data.json
